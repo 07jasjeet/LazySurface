@@ -235,3 +235,7 @@ Each is a symptom you will actually see, why it happens, and the fix.
 - Keep library code free of JVM-only APIs (`String.format`, `System.currentTimeMillis`); the iOS compilation catches them, so build all targets before assuming green.
 - Do not apply the `org.jetbrains.compose` Gradle plugin to modules that also apply AGP's KMP library plugin (incompatible resources wiring). Only `app:desktopApp` and `app:webApp` apply it.
 - Profile release builds: on Android an unminified, debug-signed, `<profileable>` build; on iOS set the Xcode scheme's build configuration to Release (Kotlin/Native debug binaries are unoptimized). The Worst case sample is the perf harness; its HUD reports the library's `Measure` / `Resolve` / `Solve` phases live. `ConstraintSolverPerfTest` is a JVM micro-benchmark, not device numbers.
+
+## License
+
+[MIT](LICENSE)
