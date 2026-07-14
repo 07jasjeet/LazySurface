@@ -5,6 +5,40 @@ plugins {
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.android.kotlin.multiplatform.library)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.maven.publish)
+}
+
+mavenPublishing {
+    publishToMavenCentral()
+    signAllPublications()
+    coordinates("io.github.07jasjeet", "lazysurface", "0.1.0")
+
+    pom {
+        name.set("LazySurface")
+        description.set(
+            "A lazy 2D-plane layout for Compose Multiplatform: items declared by key " +
+                "and spatial relations, not coordinates."
+        )
+        url.set("https://github.com/07jasjeet/LazySurface")
+        licenses {
+            license {
+                name.set("MIT License")
+                url.set("https://opensource.org/license/mit")
+            }
+        }
+        developers {
+            developer {
+                id.set("07jasjeet")
+                name.set("Jasjeet Singh")
+                url.set("https://github.com/07jasjeet")
+            }
+        }
+        scm {
+            url.set("https://github.com/07jasjeet/LazySurface")
+            connection.set("scm:git:git://github.com/07jasjeet/LazySurface.git")
+            developerConnection.set("scm:git:ssh://git@github.com/07jasjeet/LazySurface.git")
+        }
+    }
 }
 
 kotlin {
@@ -27,14 +61,14 @@ kotlin {
 
     sourceSets {
         commonMain.dependencies {
-            // Keep this list minimal: the Android AAR is consumed as a bare file (no
-            // POM), so every dependency here must already exist on the consuming
-            // project's classpath. On Android these org.jetbrains.compose coordinates
-            // resolve to the same androidx.compose artifacts the consumer ships.
-            implementation(libs.cmp.runtime)
-            implementation(libs.cmp.foundation)
-            implementation(libs.cmp.animation)
-            implementation(libs.cmp.ui)
+            // Compose types appear in the public API (Modifier, PaddingValues,
+            // FlingBehavior, ...), so consumers compile against them: api scope.
+            // On Android these org.jetbrains.compose coordinates resolve to the
+            // same androidx.compose artifacts the consumer already ships.
+            api(libs.cmp.runtime)
+            api(libs.cmp.foundation)
+            api(libs.cmp.animation)
+            api(libs.cmp.ui)
             implementation(libs.androidx.collection)
         }
         val desktopTest by getting {

@@ -2,6 +2,7 @@
 
 **Build 2D surfaces where items say *who they sit next to*, not where they are. Lazy, on every Compose platform.**
 
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.07jasjeet/lazysurface)](https://central.sonatype.com/artifact/io.github.07jasjeet/lazysurface)
 ![Platforms](https://img.shields.io/badge/platforms-Android%2024%2B%20%7C%20iOS%20%7C%20Desktop%20%7C%20Web-3DDC84?logo=android&logoColor=white)
 ![Compose](https://img.shields.io/badge/Compose-Multiplatform%201.11-4285F4?logo=jetpackcompose&logoColor=white)
 ![Kotlin](https://img.shields.io/badge/Kotlin-2.3-7F52FF?logo=kotlin&logoColor=white)
@@ -40,7 +41,13 @@ Run them yourself: `./gradlew :app:androidApp:installDebug`, `:app:desktopApp:ru
 
 ## Quick start
 
-The library is the `LazySurface/` Gradle module (100% `commonMain`). Consume it as an included module, or on Android drop in the AAR from `./gradlew :LazySurface:bundleAndroidMainAar`; it resolves to the same `androidx.compose.*` artifacts a plain Android app already ships.
+```kotlin
+commonMain.dependencies {
+    implementation("io.github.07jasjeet:lazysurface:<latest-version>")
+}
+```
+
+Published for Android, iOS, desktop JVM and wasm. On Android the Compose dependencies resolve to the same `androidx.compose.*` artifacts a plain Android app already ships.
 
 ```kotlin
 val state = rememberLazySurfaceState()
