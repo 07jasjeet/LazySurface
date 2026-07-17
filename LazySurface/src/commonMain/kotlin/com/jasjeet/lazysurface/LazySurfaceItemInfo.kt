@@ -28,6 +28,13 @@ data class LazySurfaceVisibleItemInfo(
      * display-only and never reflected here.
      */
     val viewportRect: Rect,
+    /**
+     * Where the item is DRAWN this frame, in surface coordinates: equals [rect] at rest,
+     * but mid-[LazySurfaceItemScope.animateItem] glide it tracks the animated position
+     * while [rect] already holds the settled target. Overlays that must line up with the
+     * pixels on screen (relation lines, halos, badges) should use this one.
+     */
+    val displayRect: Rect = rect,
 )
 
 /**

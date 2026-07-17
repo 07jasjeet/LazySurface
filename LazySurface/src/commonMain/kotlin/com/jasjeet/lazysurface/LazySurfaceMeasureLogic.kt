@@ -521,6 +521,9 @@ private fun LazyLayoutMeasureScope.measureLazySurfaceImpl(
             contentType = placed.info.contentType,
             rect = placed.rect,
             viewportRect = surfaceRectInViewport(placed.rect, center, zoom, viewportSize),
+            displayRect = placed.displayTopLeft
+                ?.let { Rect(it, placed.rect.size) }
+                ?: placed.rect,
         )
     }
 
