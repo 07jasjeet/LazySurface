@@ -753,6 +753,24 @@ class LazySurfaceState(
         }
     }
 
+    /**
+     * Animates [zoom] from its current value to [targetZoom], keeping the surface point at
+     * the viewport centre fixed (the same anchor the placement math zooms around). Runs
+     * through the same gesture mutex as [animateToItem], so a user touch interrupts it.
+     * The value is applied as-is — stay within the zoom range the surface was given, the
+     * way the pinch gesture does.
+     */
+    suspend fun animateZoomTo(
+        targetZoom: Float,
+        animationSpec: AnimationSpec<Float> = spring(stiffness = Spring.StiffnessLow),
+    ) {
+        drag(MutatePriority.UserInput) {
+            animate(zoom, targetZoom, animationSpec = animationSpec) { value, _ ->
+                zoom = value
+            }
+        }
+    }
+
     private var activeNavigations = 0
 
     /**
