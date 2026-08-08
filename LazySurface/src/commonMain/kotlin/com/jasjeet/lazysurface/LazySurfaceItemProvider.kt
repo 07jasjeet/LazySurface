@@ -17,7 +17,7 @@ internal class LazySurfaceItemProvider(
     private val content: LazySurfaceContent,
     private val itemScope: LazySurfaceItemScope,
 ) : LazyLayoutItemProvider {
-    override val itemCount: Int get() = content.entries.size
+    override val itemCount: Int get() = content.itemCount
 
     /**
      * The [androidx.compose.foundation.lazy.layout.LazyLayoutMeasureScope.compose]
@@ -26,15 +26,7 @@ internal class LazySurfaceItemProvider(
      */
     fun composeIndexOf(key: Any): Int = content.keyToIndex.getOrDefault(key, -1)
 
-    val itemInfos: List<LazySurfaceItemInfo> by lazy {
-        content.entries.map { entry ->
-            LazySurfaceItemInfo(
-                key = entry.key,
-                neighbors = entry.neighbors,
-                contentType = entry.contentType,
-            )
-        }
-    }
+    val itemInfos: List<LazySurfaceItemInfo> get() = content.itemInfos
 
     val itemByKey: ScatterMap<Any, LazySurfaceItemInfo> by lazy {
         val map = MutableScatterMap<Any, LazySurfaceItemInfo>(itemInfos.size)
@@ -42,16 +34,16 @@ internal class LazySurfaceItemProvider(
         map
     }
 
-    fun entryAt(index: Int): LazySurfaceItemEntry = content.entries[index]
-
     @Composable
     override fun Item(index: Int, key: Any) {
-        content.entries[index].content(itemScope)
+        content.withInterval(index) { localIndex, interval ->
+            interval.item(itemScope, localIndex)
+        }
     }
 
-    override fun getKey(index: Int): Any = content.entries[index].key
+    override fun getKey(index: Int): Any = content.itemInfos[index].key
 
-    override fun getContentType(index: Int): Any? = content.entries[index].contentType
+    override fun getContentType(index: Int): Any? = content.itemInfos[index].contentType
 
     override fun getIndex(key: Any): Int = content.keyToIndex.getOrDefault(key, -1)
 

@@ -39,6 +39,46 @@ interface LazySurfaceScope {
         neighbors: LazySurfaceNeighborsScope.() -> Unit = {},
         content: @Composable LazySurfaceItemScope.() -> Unit
     )
+
+    /**
+     * Adds one item per element of [items], all sharing the single [itemContent]
+     * composable. The lambda is stored once for the whole call (an interval, the
+     * way `LazyColumn.items` stores content) and entries reference into it, so a
+     * collection costs one content lambda, not one per element. Prefer this over
+     * calling [item] in a loop when the elements render the same way, and pair it
+     * with [contentType] for composition reuse.
+     *
+     * Sizing and key rules are those of [item]. [key] defaults to the element
+     * itself, so elements must then be unique, stable, and Bundle-storable on
+     * Android.
+     *
+     * ```
+     * items(cities, key = { it.id }, neighbors = { city -> endOf(city.westOf) }) { city ->
+     *     CityCard(city)
+     * }
+     * ```
+     */
+    fun <T : Any> items(
+        items: List<T>,
+        key: (item: T) -> Any = { it },
+        contentType: (item: T) -> Any? = { null },
+        neighbors: LazySurfaceNeighborsScope.(item: T) -> Unit = {},
+        itemContent: @Composable LazySurfaceItemScope.(item: T) -> Unit,
+    )
+
+    /**
+     * [items] with the element's position in the list handed to every lambda, for
+     * collections whose relations or keys derive from the index (chains, grids,
+     * rings). [key] defaults to the element itself, not the index: index keys
+     * would silently re-identify every item on insertion or removal.
+     */
+    fun <T : Any> itemsIndexed(
+        items: List<T>,
+        key: (index: Int, item: T) -> Any = { _, item -> item },
+        contentType: (index: Int, item: T) -> Any? = { _, _ -> null },
+        neighbors: LazySurfaceNeighborsScope.(index: Int, item: T) -> Unit = { _, _ -> },
+        itemContent: @Composable LazySurfaceItemScope.(index: Int, item: T) -> Unit,
+    )
 }
 
 /**
