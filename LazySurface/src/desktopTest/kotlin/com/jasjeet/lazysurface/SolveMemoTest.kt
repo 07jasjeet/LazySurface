@@ -1,17 +1,14 @@
 package com.jasjeet.lazysurface
 
-import androidx.collection.MutableScatterMap
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.geometry.Size
+import androidx.collection.MutableObjectIntMap
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Test
 
 /**
  * The solver memo: identical inputs replay the previous refinement instead of
- * re-running the sweeps, any change in the pre-solve positions or the constraint
- * templates re-solves.
+ * re-running the sweeps, any change in the pre-solve geometry or the resolved
+ * membership re-solves.
  */
 class SolveMemoTest {
     private fun info(key: String, vararg neighbors: LazySurfaceNeighbor) = LazySurfaceItemInfo(
@@ -31,66 +28,85 @@ class SolveMemoTest {
         itemByKey = infos.associateBy { it.key as Any }.toScatterMap(),
     ) { it.neighbors }
 
-    private fun startPositions() = MutableScatterMap<Any, Rect>().apply {
-        put("a", Rect(Offset(0f, 0f), Size(100f, 100f)))
-        put("b", Rect(Offset(200f, 0f), Size(100f, 100f)))
+    private fun indexOf(vararg keys: String) = MutableObjectIntMap<Any>().apply {
+        keys.forEachIndexed { i, key -> put(key, i) }
+    }
+
+    private fun ResolveScratch.resolve(index: Int, x: Float, y: Float) {
+        left[index] = x
+        top[index] = y
+        width[index] = 100f
+        height[index] = 100f
+        markResolved(index)
     }
 
     @Test
     fun `identical input replays the previous result, changed input re-solves`() {
         val memo = SolveMemo()
+        val itemIndexOf = indexOf("a", "b")
+        val scratch = ResolveScratch(2)
 
-        val first = startPositions()
-        val firstMoved = solveMemoized(memo, first, constraints, isRtl = false)
+        scratch.beginPass()
+        scratch.resolve(0, 0f, 0f)
+        scratch.resolve(1, 200f, 0f)
+        val firstMoved = solveMemoized(memo, scratch, constraints, itemIndexOf, isRtl = false)
         assertEquals(true, firstMoved)
-        val firstResult = Rect(first["b"]!!.topLeft, first["b"]!!.size)
 
         // Sentinel: if the second call replays the memo, this value surfaces, a
         // re-solve would overwrite it with the real refinement.
-        val sentinel = Rect(Offset(-9999f, -9999f), Size(1f, 1f))
-        memo.postSolve["b"] = sentinel
+        memo.postLeft[1] = -9999f
+        memo.postTop[1] = -9999f
 
-        val second = startPositions()
-        val secondMoved = solveMemoized(memo, second, constraints, isRtl = false)
-        assertEquals(sentinel, second["b"])
+        scratch.beginPass()
+        scratch.resolve(0, 0f, 0f)
+        scratch.resolve(1, 200f, 0f)
+        val secondMoved = solveMemoized(memo, scratch, constraints, itemIndexOf, isRtl = false)
+        assertEquals(-9999f, scratch.left[1])
         assertEquals(firstMoved, secondMoved)
 
         // A different starting position must miss the memo and truly solve.
-        val third = startPositions().apply {
-            put("b", Rect(Offset(300f, 0f), Size(100f, 100f)))
-        }
-        solveMemoized(memo, third, constraints, isRtl = false)
-        assertNotEquals(sentinel, third["b"])
-        // And the memo now holds the new generation: replaying the new input works.
-        val fourth = startPositions().apply {
-            put("b", Rect(Offset(300f, 0f), Size(100f, 100f)))
-        }
-        solveMemoized(memo, fourth, constraints, isRtl = false)
-        assertEquals(third["b"], fourth["b"])
+        scratch.beginPass()
+        scratch.resolve(0, 0f, 0f)
+        scratch.resolve(1, 300f, 0f)
+        solveMemoized(memo, scratch, constraints, itemIndexOf, isRtl = false)
+        assertNotEquals(-9999f, scratch.left[1])
+        val thirdLeft = scratch.left[1]
 
-        // Sanity: the memoized second run produced the same geometry as the first
-        // for the untouched key.
-        assertEquals(firstResult, firstResult)
+        // And the memo now holds the new generation: replaying the new input works.
+        scratch.beginPass()
+        scratch.resolve(0, 0f, 0f)
+        scratch.resolve(1, 300f, 0f)
+        solveMemoized(memo, scratch, constraints, itemIndexOf, isRtl = false)
+        assertEquals(thirdLeft, scratch.left[1])
     }
 
     @Test
-    fun `the same rect values under a different key set miss the memo`() {
+    fun `the same geometry under a different resolved set misses the memo`() {
         val memo = SolveMemo()
-        val first = startPositions()
-        solveMemoized(memo, first, constraints, isRtl = false)
+        // A third, relation-less item shares the index space: swapping which index
+        // resolved (same rect values) must read as a different input.
+        val itemIndexOf = indexOf("a", "b", "c")
+        val scratch = ResolveScratch(3)
 
-        val sentinel = Rect(Offset(-9999f, -9999f), Size(1f, 1f))
-        memo.postSolve["b"] = sentinel
+        scratch.beginPass()
+        scratch.resolve(0, 0f, 0f)
+        scratch.resolve(1, 200f, 0f)
+        solveMemoized(memo, scratch, constraints, itemIndexOf, isRtl = false)
 
-        // Same entry count, same rect values, but "b" swapped for "c": the input
-        // comparison must catch the key change, not just sizes and values.
-        val swapped = MutableScatterMap<Any, Rect>().apply {
-            put("a", Rect(Offset(0f, 0f), Size(100f, 100f)))
-            put("c", Rect(Offset(200f, 0f), Size(100f, 100f)))
-        }
-        solveMemoized(memo, swapped, constraints, isRtl = false)
+        memo.postLeft[1] = -9999f
+        memo.postTop[1] = -9999f
 
-        assertNotEquals("a key swap must re-solve, not replay", sentinel, swapped["b"])
-        assertEquals(null, swapped["b"])
+        // Same resolved count, same rect values, but "b" swapped for "c": the input
+        // comparison must catch the membership change, not just sizes and values.
+        scratch.beginPass()
+        scratch.resolve(0, 0f, 0f)
+        scratch.resolve(2, 200f, 0f)
+        scratch.left[1] = 123f // stale, unresolved slot: a replay would clobber it
+        solveMemoized(memo, scratch, constraints, itemIndexOf, isRtl = false)
+
+        assertNotEquals("a membership swap must re-solve, not replay", -9999f, scratch.left[1])
+        assertEquals(123f, scratch.left[1])
+        assertEquals(false, memo.resolvedFlags[1])
+        assertEquals(true, memo.resolvedFlags[2])
     }
 }

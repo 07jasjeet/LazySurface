@@ -74,6 +74,10 @@ kotlin {
         val desktopTest by getting {
             dependencies {
                 implementation(libs.junit)
+                // Skia native binaries for headless-rendering tests: the compose
+                // plugin normally wires these, but this module declares CMP as plain
+                // coordinates (see the note at the top of this file).
+                implementation("org.jetbrains.skiko:skiko-awt-runtime-macos-arm64:0.144.6")
             }
         }
     }

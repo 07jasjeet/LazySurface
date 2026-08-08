@@ -23,7 +23,7 @@ class SolverRtlTest {
             contentType = null,
         )
 
-    private fun compiled(infos: List<LazySurfaceItemInfo>, isRtl: Boolean) = CompiledConstraints(
+    private fun compiled(infos: List<LazySurfaceItemInfo>, isRtl: Boolean) = MapSolver(
         buildRelationConstraints(infos, infos.associateBy { it.key as Any }.toScatterMap()),
         isRtl = isRtl,
     )

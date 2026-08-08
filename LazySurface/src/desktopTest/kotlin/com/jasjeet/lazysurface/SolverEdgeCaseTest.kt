@@ -30,7 +30,7 @@ class SolverEdgeCaseTest {
         val resolved = mutableScatterMapOf<Any, Rect>(
             "a" to Rect(Offset(0f, 0f), Size(100f, 100f)),
         )
-        val moved = CompiledConstraints(
+        val moved = MapSolver(
             buildRelationConstraints(infos, infos.associateBy { it.key as Any }.toScatterMap()),
             isRtl = false,
         ).solve(resolved)
@@ -52,7 +52,7 @@ class SolverEdgeCaseTest {
             "a" to Rect(Offset(0f, 0f), Size(100f, 100f)),
             "b" to Rect(Offset(100f, 0f), Size(100f, 100f)),
         )
-        val moved = CompiledConstraints(
+        val moved = MapSolver(
             buildRelationConstraints(infos, infos.associateBy { it.key as Any }.toScatterMap()),
             isRtl = false,
         ).solve(resolved)
@@ -74,7 +74,7 @@ class SolverEdgeCaseTest {
             "a" to Rect(Offset(0f, 0f), Size(100f, 100f)),
             "b" to Rect(Offset(100f, -100f), Size(100f, 100f)),
         )
-        val moved = CompiledConstraints(
+        val moved = MapSolver(
             buildRelationConstraints(infos, infos.associateBy { it.key as Any }.toScatterMap()),
             isRtl = false,
         ).solve(resolved)
@@ -95,7 +95,7 @@ class SolverEdgeCaseTest {
             "a" to Rect(Offset(0f, 0f), Size(100f, 100f)),
             "b" to Rect(Offset(50f, -50f), Size(100f, 100f)),
         )
-        CompiledConstraints(
+        MapSolver(
             buildRelationConstraints(infos, infos.associateBy { it.key as Any }.toScatterMap()),
             isRtl = false,
         ).solve(resolved)

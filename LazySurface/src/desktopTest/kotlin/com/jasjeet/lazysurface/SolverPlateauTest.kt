@@ -44,9 +44,9 @@ class SolverPlateauTest {
         "d" to Rect(Offset(330f, 0f), Size(100f, 100f)),
     )
 
-    private fun compiled(contradiction: Boolean): CompiledConstraints {
+    private fun compiled(contradiction: Boolean): MapSolver {
         val infos = chain(contradiction)
-        return CompiledConstraints(
+        return MapSolver(
             buildRelationConstraints(infos, infos.associateBy { it.key as Any }.toScatterMap()),
             isRtl = false,
         )
@@ -73,7 +73,7 @@ class SolverPlateauTest {
     }
 
     /** A consistent chain whose cross-axis alignment starts as a staircase. */
-    private fun staircase(length: Int): Pair<CompiledConstraints, androidx.collection.MutableScatterMap<Any, Rect>> {
+    private fun staircase(length: Int): Pair<MapSolver, androidx.collection.MutableScatterMap<Any, Rect>> {
         val infos = (0 until length).map { i ->
             if (i == 0) info("i0", LazySurfaceNeighbor.AtPivot)
             else info("i$i", LazySurfaceNeighbor.endOf("i${i - 1}").copy(margin = gap))
@@ -82,7 +82,7 @@ class SolverPlateauTest {
         for (i in 0 until length) {
             resolved["i$i"] = Rect(Offset(i * 110f, i * 20f), Size(100f, 100f))
         }
-        val solver = CompiledConstraints(
+        val solver = MapSolver(
             buildRelationConstraints(infos, infos.associateBy { it.key as Any }.toScatterMap()),
             isRtl = false,
         )

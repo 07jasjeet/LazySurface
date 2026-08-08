@@ -27,7 +27,7 @@ import org.junit.Test
  * ```
  *
  * A ring built by [ring] looks like this (cardinals on the axes ray at `ringSpacing`, corners
- * tucked in on the diagonals at `diagonalSpacing`, both verbs — all of these are hard rays),
+ * tucked in on the diagonals at `diagonalSpacing`, both verbs, all of these are hard rays),
  * indices in fill order:
  *
  * ```
@@ -64,8 +64,8 @@ internal class RingScenario {
 
     /**
      * A placeAround-style ring 1 around an already-added [center]: up to eight [size] items filling
-     * [slotOrder] — cardinals raying at [ringSpacing], corners at [diagonalSpacing] with both verbs
-     * — each registered with its ray relations and placed at its exact declared spot. Returns the
+     * [slotOrder]: cardinals raying at [ringSpacing], corners at [diagonalSpacing] with both verbs,
+     * each registered with its ray relations and placed at its exact declared spot. Returns the
      * keys in fill order (index 0 = N, 1 = E, 2 = S, 3 = W, 4 = NE, 5 = SE, 6 = SW, 7 = NW).
      */
     fun ring(
@@ -125,7 +125,7 @@ internal class RingScenario {
         }
         val byKey = MutableScatterMap<Any, LazySurfaceItemInfo>(infos.size)
         infos.forEach { byKey[it.key] = it }
-        val compiled = CompiledConstraints(buildRelationConstraints(infos, byKey), isRtl = false)
+        val compiled = MapSolver(buildRelationConstraints(infos, byKey), isRtl = false)
         for (pass in 0 until passes) {
             if (!compiled.solve(rects)) break
         }
@@ -178,7 +178,7 @@ internal class RingScenario {
  * ```
  *
  * Every pass re-fights the tug: the cardinal is dragged, its ray floor resists, and the petal
- * between it and the center takes hard pushes its soft ray pull can't return — settling far off
+ * between it and the center takes hard pushes its soft ray pull can't return, settling far off
  * its declared gap. With Free flanks (floors only, no declared geometry) everything holds exactly.
  */
 class RingFlankFightTest {
@@ -230,7 +230,7 @@ class RingFlankFightTest {
  * ```
  *
  * The clusters carry mutual Free no-overlap floors, so instead of overlapping, the floors fire
- * permanently and push the facing petals off their declared ray gaps — the "petal settles far
+ * permanently and push the facing petals off their declared ray gaps, the "petal settles far
  * from its own centre" symptom. Widening the diagonal until both sub-rings' rects clear (0.4 of
  * the ring spacing here) removes the contact and every gap holds exactly.
  */
@@ -266,7 +266,7 @@ class DiagonalWhorlCrowdingTest {
     fun `quarter-margin diagonal crowds facing petals, a wider diagonal clears them`() {
         val tight = scenario(diagonalSpacing = 212.5f)
         val wide = scenario(diagonalSpacing = 340f)
-        // Fill order: index 3 = W petal, index 6 = SW petal — the two facing the inner cluster.
+        // Fill order: index 3 = W petal, index 6 = SW petal, the two facing the inner cluster.
         println("diag 212.5: west stretch=${tight.stretch("b3", "B")}, sw stretch=${tight.stretch("b6", "B")}")
         println("diag 340.0: west stretch=${wide.stretch("b3", "B")}, sw stretch=${wide.stretch("b6", "B")}")
 

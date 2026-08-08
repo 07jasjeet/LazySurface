@@ -124,7 +124,7 @@ class DslVerbsTest {
             "hub" to Rect(Offset(0f, -400f), Size(100f, 100f)),
             "satellite" to Rect(Offset(0f, -300f), Size(100f, 100f)),
         )
-        val moved = CompiledConstraints(constraints, isRtl = false).solve(resolved)
+        val moved = MapSolver(constraints, isRtl = false).solve(resolved)
         assertFalse("a flush satellite under a wide-margin hub is at rest", moved)
     }
 }

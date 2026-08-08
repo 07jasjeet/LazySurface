@@ -41,7 +41,7 @@ class FreeAlignmentTest {
             ).toScatterMap(),
         ) { it.neighbors }
 
-        val moved = CompiledConstraints(constraints, isRtl = false).solve(resolved)
+        val moved = MapSolver(constraints, isRtl = false).solve(resolved)
 
         assertFalse("free link must not attract or align", moved)
         assertEquals(Rect(Offset(600f, -400f), Size(100f, 100f)), resolved["b"])
@@ -74,7 +74,7 @@ class FreeAlignmentTest {
             itemByKey = mapOf<Any, LazySurfaceItemInfo>("a" to aInfo, "b" to bInfo).toScatterMap(),
         ) { it.neighbors }
 
-        val moved = CompiledConstraints(constraints, isRtl = false).solve(resolved)
+        val moved = MapSolver(constraints, isRtl = false).solve(resolved)
 
         assertFalse("a non-overlapping free link must not enforce the margin gap", moved)
         assertEquals(Rect(Offset(150f, 0f), Size(100f, 100f)), resolved["b"])
@@ -100,7 +100,7 @@ class FreeAlignmentTest {
             ).toScatterMap(),
         ) { it.neighbors }
 
-        val moved = CompiledConstraints(constraints, isRtl = false).solve(resolved)
+        val moved = MapSolver(constraints, isRtl = false).solve(resolved)
 
         assertFalse("a free link must not resolve axis-projection overlap", moved)
         assertEquals(Rect(Offset(0f, 150f), Size(300f, 100f)), resolved["b"])
@@ -123,7 +123,7 @@ class FreeAlignmentTest {
             ).toScatterMap(),
         ) { it.neighbors }
 
-        CompiledConstraints(constraints, isRtl = false).solve(resolved)
+        MapSolver(constraints, isRtl = false).solve(resolved)
 
         val a = resolved["a"]!!
         val b = resolved["b"]!!

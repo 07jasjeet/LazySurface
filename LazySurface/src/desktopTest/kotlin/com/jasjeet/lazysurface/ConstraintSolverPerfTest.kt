@@ -49,7 +49,7 @@ class ConstraintSolverPerfTest {
         val byKey = infos.associateBy { it.key as Any }.toScatterMap()
 
         // Compiled once and reused across solves, like production.
-        val compiled = CompiledConstraints(buildRelationConstraints(infos, byKey), isRtl = false)
+        val compiled = MapSolver(buildRelationConstraints(infos, byKey), isRtl = false)
 
         fun measure(oversized: Boolean, runs: Int): Double {
             // Fresh input per run, building it is excluded from the timing, like

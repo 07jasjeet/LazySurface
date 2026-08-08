@@ -60,11 +60,10 @@ class RubberBandOverscrollEffect(
         get() = overshoot != Offset.Zero
 
     /**
-     * The band's current visual translation in window pixels — the resisted overshoot the
-     * [node] applies to the content it decorates; [Offset.Zero] when not overscrolled.
-     * Overlays drawn outside the decorated content (a relation-lines layer on the surface's
-     * own modifier, say) can read this to move with the band; it is snapshot-backed, so a
-     * draw block reading it re-draws as the band stretches and springs back.
+     * The band's current visual translation in window pixels, the resisted overshoot
+     * [node] applies to the content it decorates. [Offset.Zero] when not overscrolled.
+     * Overlays drawn outside the decorated content can read this to move with the
+     * band. Snapshot-backed, so a draw block reading it re-draws as the band moves.
      */
     val displacement: Offset
         get() = Offset(

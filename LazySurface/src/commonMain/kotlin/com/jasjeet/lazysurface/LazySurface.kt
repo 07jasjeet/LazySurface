@@ -135,6 +135,16 @@ fun LazySurface(
 
     val session = remember(state) { SurfaceGestureSession() }
 
+    // The measure machine: everything that exists only to serve the measure pass
+    // lives on this object, not on the state, and dies with this composition.
+    val measurePolicy = remember(state) {
+        LazySurfaceMeasurePolicy(
+            state = state,
+            itemProvider = itemProviderLambda,
+            animationScope = scope,
+        )
+    }
+
     // Read at gesture end through updated state, so changing the behavior never
     // restarts the pointer input (which would cancel an active gesture).
     val currentFlingBehavior by rememberUpdatedState(flingBehavior)
@@ -335,17 +345,8 @@ fun LazySurface(
             .clipToBounds()
             .overscroll(overscrollEffect),
         itemProvider = itemProviderLambda,
-        prefetchState = state.prefetchState,
-        measurePolicy = remember(state) {
-            { viewportConstraints ->
-                measureLazySurface(
-                    itemProvider = itemProviderLambda(),
-                    state = state,
-                    viewportConstraints = viewportConstraints,
-                    animationScope = scope,
-                )
-            }
-        }
+        prefetchState = measurePolicy.prefetchState,
+        measurePolicy = measurePolicy,
     )
 }
 

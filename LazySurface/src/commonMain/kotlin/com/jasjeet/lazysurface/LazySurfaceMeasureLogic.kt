@@ -1,9 +1,11 @@
 package com.jasjeet.lazysurface
 
+import androidx.collection.IntList
+import androidx.collection.MutableIntList
 import androidx.collection.MutableScatterMap
-import androidx.collection.ScatterMap
 import androidx.collection.MutableScatterSet
-import androidx.collection.mutableScatterMapOf
+import androidx.collection.ObjectIntMap
+import androidx.collection.ScatterMap
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.lazy.layout.LazyLayoutMeasureScope
 import androidx.compose.ui.geometry.Offset
@@ -16,7 +18,6 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.center
-import androidx.compose.ui.unit.toSize
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -27,26 +28,29 @@ import kotlin.math.roundToInt
  * Positions resolve by walking the neighbour graph breadth-first from the pivot. An
  * item is positioned against ALL of its declared relations jointly: it defers while
  * any endpoint might still resolve this pass, and only the final pass drops endpoints
- * that never resolved (see `jointRect` for the per-axis combination), a global
- * relaxation pass then refines all positions together, see [CompiledConstraints.solve].
+ * that never resolved (see `jointPlace` for the per-axis combination), a global
+ * relaxation pass then refines all positions together, see [CompiledConstraints].
  * Unknown-size items are composed only when they could fall inside the resolution
  * region, and everything reachable only through items awaiting their first
  * measurement stays unresolved until scrolled or animated towards, that is what
  * keeps the surface lazy.
  *
- * All of this speaks item *keys*, the only index in play is the one LazyLayout's
- * `compose` call demands, translated at that single boundary by
- * [LazySurfaceItemProvider.composeIndexOf].
+ * The pass runs on a dense index space: registration order indexes every per-pass
+ * array (see [ResolveScratch]), edges carry their source's index, and the solver
+ * sweeps the same arrays in place, so resolving hashes no keys and allocates no
+ * Rects. Keys reappear only at the boundaries: LazyLayout's `compose` call and the
+ * published state maps, materialized only when geometry actually changed.
  */
 @OptIn(ExperimentalFoundationApi::class)
 internal fun LazyLayoutMeasureScope.measureLazySurface(
     itemProvider: LazySurfaceItemProvider,
     state: LazySurfaceState,
+    policy: LazySurfaceMeasurePolicy,
     viewportConstraints: Constraints,
     animationScope: CoroutineScope,
 ): MeasureResult {
     return measured(LazySurfacePerformance.Phase.Measure) {
-        measureLazySurfaceImpl(itemProvider, state, viewportConstraints, animationScope)
+        measureLazySurfaceImpl(itemProvider, state, policy, viewportConstraints, animationScope)
     }
 }
 
@@ -54,35 +58,26 @@ internal fun LazyLayoutMeasureScope.measureLazySurface(
 private fun LazyLayoutMeasureScope.measureLazySurfaceImpl(
     itemProvider: LazySurfaceItemProvider,
     state: LazySurfaceState,
+    policy: LazySurfaceMeasurePolicy,
     viewportConstraints: Constraints,
     animationScope: CoroutineScope,
 ): MeasureResult {
-    /** Size of the container the surface is measured into, in raw window pixels. */
     val viewportSize = IntSize(
         width = viewportConstraints.maxWidth,
         height = viewportConstraints.maxHeight,
     )
     state.viewportSize = viewportSize
 
-    /**
-     * Sides and cross-axis alignments are declared direction-relative (start/end),
-     * this is where they resolve to absolute surface geometry, so the whole
-     * arrangement mirrors under RTL.
-     */
     val isRtl = layoutDirection == LayoutDirection.Rtl
-
-    /** Static descriptions of every registered item, in registration order. */
     val infos = itemProvider.itemInfos
 
     val itemByKey = itemProvider.itemByKey
     state.updateItems(infos, itemByKey)
+    policy.ensureContent(infos, itemByKey)
 
     val zoom = state.zoom.coerceAtLeast(MinZoom)
-
-    /** Surface-space point currently at the center of the viewport. */
     val center = state.offset
 
-    /** Half the viewport's extents in surface coordinates, both scale by 1/zoom. */
     val halfWidth = viewportSize.width / (2f * zoom)
     val halfHeight = viewportSize.height / (2f * zoom)
 
@@ -110,12 +105,10 @@ private fun LazyLayoutMeasureScope.measureLazySurfaceImpl(
     )
 
     /**
-     * What unknown-size probes test against: the resolution region inflated by one
-     * more viewport extent per side. A zero-size probe marks the corner an item grows
-     * from, not its coverage, so parking an edge item whose probe sits just outside
-     * the region would freeze the frontier there for good. The viewport-derived slack
-     * is sound for any item up to two viewport extents large, with no dependence on
-     * what happens to have been measured.
+     * What unknown-size probes test against: [resolutionRect] plus one viewport
+     * extent per side. A zero-size probe marks the corner an item grows from, not
+     * its coverage, parking against the raw region would freeze the frontier for
+     * good. The slack is sound for items up to two viewport extents large.
      */
     val unknownSizeRect = Rect(
         left = resolutionRect.left - 2 * halfWidth,
@@ -129,13 +122,17 @@ private fun LazyLayoutMeasureScope.measureLazySurfaceImpl(
      * to removed items arrive already healed. The per-frame pass walks it read-only.
      */
     val graph = state.graph
+    val nodeAt = state.nodeAt
 
-    // The maps built below are freshly allocated every pass on purpose: they escape
-    // to the state, where the clamp and routing read the PREVIOUS pass's view between
-    // frames, reusing them here would corrupt that published view mid-gesture.
-
-    /** Content rects of every item whose position got resolved this pass, by key. */
-    val resolved = MutableScatterMap<Any, Rect>(infos.size)
+    // The whole pass runs on these index-addressed arrays. Key-addressed maps are
+    // materialized only at the publish boundary below, and a published view is
+    // never mutated afterwards, so readers between frames stay safe.
+    val scratch = policy.resolveScratch
+    scratch.beginPass()
+    val left = scratch.left
+    val top = scratch.top
+    val width = scratch.width
+    val height = scratch.height
 
     /**
      * Items that ended up composed AND inside the viewport, in BFS discovery order,
@@ -149,136 +146,155 @@ private fun LazyLayoutMeasureScope.measureLazySurfaceImpl(
      */
     var resolvedInViewport = false
 
-    /**
-     * Items awaiting their first measurement: positionable from a resolved neighbour
-     * but too far to be worth composing this pass, keyed with their provisional
-     * (zero-size) rects. Everything reachable only through them stays unresolved
-     * until the viewport moves closer or the approach loop forces them.
-     */
-    val awaitingMeasure = mutableScatterMapOf<Any, Rect>()
+    // Key-addressed scratch, touched only by items that compose this pass.
+    val measureScratch = policy.measureScratch.also { it.reset() }
+    val measuredPlaceables = measureScratch.measuredPlaceables
+    val measuredSpecs = measureScratch.measuredSpecs
 
-    // Pass-local scratch, reused across passes (cleared here) so steady-state
-    // scrolling allocates none of it.
-    val scratch = state.measureScratch.also { it.reset() }
-    val queue = scratch.queue
-    val deferred = scratch.deferred
-    val measuredPlaceables = scratch.measuredPlaceables
-    val measuredSpecs = scratch.measuredSpecs
+    /** Whether item [index]'s content rect overlaps [region], mirrors [Rect.overlaps]. */
+    fun overlaps(index: Int, region: Rect): Boolean =
+        left[index] < region.right && region.left < left[index] + width[index] &&
+            top[index] < region.bottom && region.top < top[index] + height[index]
+
+    /** Item [index]'s content rect, materialized. Boundary use only. */
+    fun rectOf(index: Int) = Rect(
+        left[index],
+        top[index],
+        left[index] + width[index],
+        top[index] + height[index],
+    )
 
     // Seed with the items the pivot can position directly.
-    graph[LazySurfacePivot]?.dependents?.let(queue::addAll)
+    state.pivotNode?.dependentIndices?.let(scratch::enqueueAll)
 
-    // An item is positioned against ALL of its constraints jointly: the strict drain
-    // (finalPass = false) defers while any endpoint might still resolve, the final
-    // pass drops endpoints that never resolved. Items that declared nothing are
-    // positioned by the relations others declared against them.
-    fun processItem(key: Any, forceMeasure: Boolean, finalPass: Boolean) {
-        if (resolved.containsKey(key)) return
-        val info = itemByKey[key] ?: return
-        val node = graph[key] ?: return
+    fun processItem(index: Int, forceMeasure: Boolean, finalPass: Boolean) {
+        if (scratch.isResolved(index)) return
+        val node = nodeAt[index] ?: return
+        val info = infos[index]
 
-        // Pick the constraint set: the item's own declarations while any endpoint is
-        // usable, otherwise the relations others declared against it. Walked in
-        // place, no per-item collection is built.
+        // The item's own declarations while any endpoint is usable, otherwise the
+        // relations others declared against it.
         var edges = node.ownConstraints
-        var usable = 0
+        var usableSources = 0
         for (edge in edges) {
-            if (edge.sourceKey === LazySurfacePivot || resolved.containsKey(edge.sourceKey)) {
-                usable++
+            if (edge.sourceIndex == PivotIndex || scratch.isResolved(edge.sourceIndex)) {
+                usableSources++
             } else if (!finalPass) {
-                // The endpoint might still resolve this pass: wait rather than
-                // resolve against a partial constraint set.
-                deferred.add(key)
+                // Might still resolve this pass: wait for the full constraint set.
+                scratch.defer(index)
                 return
             }
         }
-        if (usable == 0) {
+        if (usableSources == 0) {
             edges = node.fallbackConstraints
             for (edge in edges) {
-                if (resolved.containsKey(edge.sourceKey)) usable++
+                if (edge.sourceIndex != PivotIndex && scratch.isResolved(edge.sourceIndex))
+                    usableSources++
             }
         }
-        if (usable == 0) {
-            if (!finalPass) deferred.add(key)
+        if (usableSources == 0) {
+            if (!finalPass) scratch.defer(index)
             return
         }
 
         val constraintEdges = edges
 
         /**
-         * The joint placement for a given size, combined per axis: on its own axis a
-         * relation states the declared separation, on the cross axis only an
-         * alignment preference. Each axis averages the separations when it has any
-         * and falls back to alignment preferences otherwise, so a diagonal pair
-         * resolves to the corner where its two separations meet instead of their
-         * midpoint. Remaining disagreements are the global solver's job, unresolved
-         * endpoints (final pass only) skip.
+         * The joint placement for a given size: each axis averages the declared
+         * separations when it has any and falls back to cross-axis alignment
+         * preferences otherwise, so a diagonal pair resolves to its corner instead
+         * of the midpoint. Remaining disagreements are the solver's job.
          */
-        fun jointRect(size: Size): Rect {
-            var mainX = 0f
-            var mainY = 0f
-            var crossX = 0f
-            var crossY = 0f
-            var mainXCount = 0
-            var mainYCount = 0
-            var crossXCount = 0
-            var crossYCount = 0
+        fun jointPlace(sizeWidth: Float, sizeHeight: Float): Offset {
+            var declaredX = 0f
+            var declaredY = 0f
+            var alignmentX = 0f
+            var alignmentY = 0f
+            var declaredXCount = 0
+            var declaredYCount = 0
+            var alignmentXCount = 0
+            var alignmentYCount = 0
             for (edge in constraintEdges) {
-                val sourceRect = if (edge.sourceKey === LazySurfacePivot)
-                    Rect.Zero
-                else
-                    resolved[edge.sourceKey] ?: continue
+                val sourceIndex = edge.sourceIndex
+                val anchorLeft: Float
+                val anchorTop: Float
+                val anchorRight: Float
+                val anchorBottom: Float
+                if (sourceIndex == PivotIndex) {
+                    anchorLeft = 0f; anchorTop = 0f; anchorRight = 0f; anchorBottom = 0f
+                } else if (scratch.isResolved(sourceIndex)) {
+                    anchorLeft = left[sourceIndex]
+                    anchorTop = top[sourceIndex]
+                    anchorRight = anchorLeft + width[sourceIndex]
+                    anchorBottom = anchorTop + height[sourceIndex]
+                } else {
+                    continue
+                }
 
-                val exact = placeItemTopLeft(
-                    anchorRect = sourceRect,
+                val edgePlacement = placeItemTopLeft(
+                    anchorLeft = anchorLeft,
+                    anchorTop = anchorTop,
+                    anchorRight = anchorRight,
+                    anchorBottom = anchorBottom,
                     side = edge.sideOfSource,
                     alignment = edge.alignment,
-                    size = size,
+                    sizeWidth = sizeWidth,
+                    sizeHeight = sizeHeight,
                     isRtl = isRtl,
                     relationMargin = edge.margin,
                 )
                 when (edge.sideOfSource) {
                     null -> { // centered on the anchor: both axes declared
-                        mainX += exact.x; mainXCount++
-                        mainY += exact.y; mainYCount++
+                        declaredX += edgePlacement.x
+                        declaredXCount++
+
+                        declaredY += edgePlacement.y
+                        declaredYCount++
                     }
                     LazySurfaceNeighbor.Side.Start, LazySurfaceNeighbor.Side.End -> {
-                        mainX += exact.x; mainXCount++
-                        crossY += exact.y; crossYCount++
+                        declaredX += edgePlacement.x
+                        declaredXCount++
+
+                        alignmentY += edgePlacement.y
+                        alignmentYCount++
                     }
                     else -> {
-                        mainY += exact.y; mainYCount++
-                        crossX += exact.x; crossXCount++
+                        declaredY += edgePlacement.y
+                        declaredYCount++
+
+                        alignmentX += edgePlacement.x
+                        alignmentXCount++
                     }
                 }
             }
-            val left = if (mainXCount > 0) mainX / mainXCount else crossX / crossXCount
-            val top = if (mainYCount > 0) mainY / mainYCount else crossY / crossYCount
-            return Rect(Offset(left, top), size)
+            val jointLeft =
+                if (declaredXCount > 0) declaredX / declaredXCount else alignmentX / alignmentXCount
+            val jointTop =
+                if (declaredYCount > 0) declaredY / declaredYCount else alignmentY / alignmentYCount
+            return Offset(jointLeft, jointTop)
         }
 
-        /** Last measured size, or `null` before the item has been composed once. */
-        val cachedSize = state.cachedSize(key)
-        val sizeUnknown = cachedSize == null
+        val sizeUnknown = scratch.cachedWidth[index] < 0
+        val probeWidth = if (sizeUnknown) 0f else scratch.cachedWidth[index].toFloat()
+        val probeHeight = if (sizeUnknown) 0f else scratch.cachedHeight[index].toFloat()
 
         /**
-         * Where the item would sit with its last known (or zero) size. A zero-size
-         * probe never extends past the true rect, so probe-overlap implies
-         * true-overlap, but not the reverse, which is why unknown sizes test
-         * against [unknownSizeRect] rather than the raw region.
+         * Provisional geometry at the last known (or zero) size. A zero-size probe
+         * never extends past the true rect, so probe-overlap implies true-overlap
+         * but not the reverse, hence the [unknownSizeRect] slack.
          */
-        val provisionalRect = jointRect(cachedSize?.toSize() ?: Size.Zero)
+        val probe = jointPlace(probeWidth, probeHeight)
+        left[index] = probe.x
+        top[index] = probe.y
+        width[index] = probeWidth
+        height[index] = probeHeight
 
         val shouldMeasure = forceMeasure ||
-                provisionalRect.overlaps(
-                    if (sizeUnknown) unknownSizeRect else viewportRect
-                )
+                overlaps(index, if (sizeUnknown) unknownSizeRect else viewportRect)
 
-        val rect: Rect
-
-        /** The measured content, kept only when this item might need placing. */
         var placeables: List<Placeable>? = null
         if (shouldMeasure) {
+            val key = info.key
             placeables = compose(itemProvider.composeIndexOf(key)).map { measurable ->
                 (measurable.parentData as? LazySurfaceAnimationSpecs)?.let { measuredSpecs[key] = it }
                 measurable.measure(UnboundedConstraints)
@@ -290,33 +306,41 @@ private fun LazyLayoutMeasureScope.measureLazySurfaceImpl(
                 width = placeables.maxOfOrNull { it.width } ?: 0,
                 height = placeables.maxOfOrNull { it.height } ?: 0,
             )
-            state.cacheMeasuredSize(key, measuredSize)
-            rect = jointRect(Size(measuredSize.width.toFloat(), measuredSize.height.toFloat()))
+            policy.cacheMeasuredSize(key, measuredSize)
+            val measuredWidth = measuredSize.width.toFloat()
+            val measuredHeight = measuredSize.height.toFloat()
+            val measuredTopLeft = jointPlace(measuredWidth, measuredHeight)
+            left[index] = measuredTopLeft.x
+            top[index] = measuredTopLeft.y
+            width[index] = measuredWidth
+            height[index] = measuredHeight
         } else if (sizeUnknown) {
-            // Too far to compose: parked until the viewport comes close (or the
-            // approach loop below forces it).
-            awaitingMeasure[key] = provisionalRect
-            deferred.remove(key)
+            // Too far to compose: parked, the zero-size probe stays as its
+            // provisional position until the viewport comes close.
+            scratch.park(index)
+            scratch.undefer(index)
             return
-        } else {
-            rect = provisionalRect
         }
+        // else: the probe at the cached size IS the final geometry, already written.
 
-        resolved[key] = rect
-        deferred.remove(key)
-        awaitingMeasure.remove(key)
-        if (rect.overlaps(viewportRect)) {
+        scratch.markResolved(index)
+        scratch.undefer(index)
+        scratch.unpark(index)
+        if (overlaps(index, viewportRect)) {
             resolvedInViewport = true
             if (placeables != null) {
-                placedItems.add(PlacedSurfaceItem(info, rect, placeables, measuredSpecs[key]))
+                placedItems.add(
+                    PlacedSurfaceItem(info, index, rectOf(index), placeables, measuredSpecs[info.key])
+                )
+                scratch.markPlaced(index)
             }
         }
-        graph[key]?.dependents?.let(queue::addAll)
+        scratch.enqueueAll(node.dependentIndices)
     }
 
     fun drainQueue() {
-        while (queue.isNotEmpty()) {
-            processItem(queue.removeFirst(), forceMeasure = false, finalPass = false)
+        while (scratch.hasQueuedItems()) {
+            processItem(scratch.dequeue(), forceMeasure = false, finalPass = false)
         }
     }
 
@@ -328,12 +352,12 @@ private fun LazyLayoutMeasureScope.measureLazySurfaceImpl(
     fun resolveAll() {
         drainQueue()
         var madeProgress = true
-        while (madeProgress && deferred.isNotEmpty()) {
+        while (madeProgress && scratch.deferredCount > 0) {
             madeProgress = false
-            infos.forEach { info ->
-                if (deferred.contains(info.key) && !resolved.containsKey(info.key)) {
-                    processItem(info.key, forceMeasure = false, finalPass = true)
-                    if (resolved.containsKey(info.key)) {
+            for (index in infos.indices) {
+                if (scratch.isDeferred(index) && !scratch.isResolved(index)) {
+                    processItem(index, forceMeasure = false, finalPass = true)
+                    if (scratch.isResolved(index)) {
                         madeProgress = true
                         drainQueue()
                     }
@@ -346,39 +370,53 @@ private fun LazyLayoutMeasureScope.measureLazySurfaceImpl(
         resolveAll()
     }
 
-    // Approach: when the viewport shows no resolved content (a state restore, an
-    // initial offset far from the pivot), walk towards it by force-measuring the
-    // nearest awaiting item until content arrives or the per-pass budget runs out,
-    // the size cache makes the next pass continue from there.
+    // Approach: when the viewport shows no resolved content (state restore, initial
+    // offset far from the pivot), force-measure the nearest awaiting item until
+    // content arrives or the budget runs out. The size cache carries the progress
+    // into the next pass.
 
     /** Force measurements this pass may still spend approaching the viewport. */
     var approachBudget = MaxApproachMeasurementsPerPass
-    while (approachBudget-- > 0 && awaitingMeasure.isNotEmpty() && !resolvedInViewport) {
-        var nearestKey: Any? = null
+    while (approachBudget-- > 0 && scratch.awaitingCount > 0 && !resolvedInViewport) {
+        var nearestIndex = -1
         var nearestDistance = Float.MAX_VALUE
-        awaitingMeasure.forEach { key, rect ->
-            val distance = (rect.center - center).getDistanceSquared()
+        for (index in infos.indices) {
+            if (!scratch.isAwaiting(index)) continue
+            val dx = left[index] + width[index] / 2f - center.x
+            val dy = top[index] + height[index] / 2f - center.y
+            val distance = dx * dx + dy * dy
             if (distance < nearestDistance) {
                 nearestDistance = distance
-                nearestKey = key
+                nearestIndex = index
             }
         }
-        val possibleNearestItemKey = nearestKey ?: break
-        awaitingMeasure.remove(possibleNearestItemKey)
-        processItem(possibleNearestItemKey, forceMeasure = true, finalPass = true)
+        if (nearestIndex < 0) break
+        scratch.unpark(nearestIndex)
+        processItem(nearestIndex, forceMeasure = true, finalPass = true)
         resolveAll()
     }
 
-    // Stranded: every position is known yet nothing lies inside the viewport, the
-    // content underneath was removed. Snap preference: the graph-nearest surviving
-    // relative of what was displayed (the snap hint), else the first registered
-    // resolved item, selection is by nodes, never by spatial distance.
-    if (!resolvedInViewport && awaitingMeasure.isEmpty() && resolved.isNotEmpty()) {
-        state.strandedNearestKey = state.strandedSnapHint?.takeIf(resolved::containsKey)
-            ?: infos.firstOrNull { resolved.containsKey(it.key) }?.key
+    // Stranded: every position known yet nothing under the viewport, the content
+    // beneath was removed. Snap to the hint (graph-nearest surviving relative of
+    // what was displayed), else the first registered resolved item.
+    if (!resolvedInViewport && scratch.awaitingCount == 0 && scratch.resolvedCount > 0) {
+        val hint = state.strandedSnapHint
+        val hintIndex = if (hint != null) state.itemIndexOf.getOrDefault(hint, PivotIndex) else PivotIndex
+        state.strandedNearestKey = if (hintIndex >= 0 && scratch.isResolved(hintIndex)) {
+            hint
+        } else {
+            var firstResolved: Any? = null
+            for (index in infos.indices) {
+                if (scratch.isResolved(index)) {
+                    firstResolved = infos[index].key
+                    break
+                }
+            }
+            firstResolved
+        }
         LazySurfaceDebug.log {
             "stranded: nothing under viewport at center=$center zoom=$zoom " +
-                "resolved=${resolved.size} -> snap target=${state.strandedNearestKey}"
+                "resolved=${scratch.resolvedCount} -> snap target=${state.strandedNearestKey}"
         }
     } else {
         state.strandedNearestKey = null
@@ -386,36 +424,30 @@ private fun LazyLayoutMeasureScope.measureLazySurfaceImpl(
         if (resolvedInViewport) state.strandedSnapHint = null
     }
 
-    // Refine the joint placements so declared neighbours push apart rather than
-    // overlap and alignments blend. Identical inputs skip the sweeps entirely (see
-    // [solveMemoized]): scrolling changes nothing in surface space, so scroll frames
-    // replay the previous refinement.
+    // Refine the joint placements in place on the pass arrays. Scrolling changes
+    // nothing in surface space, so scroll frames replay the previous refinement,
+    // see [solveMemoized].
     val solverMoved = measured(LazySurfacePerformance.Phase.Solve) {
-        solveMemoized(state.solveMemo, resolved, state.relationConstraints, isRtl)
+        solveMemoized(policy.solveMemo, scratch, state.relationConstraints, state.itemIndexOf, isRtl)
     }
     if (solverMoved) {
-        placedItems.forEach { placed ->
-            placed.rect = resolved[placed.info.key] ?: placed.rect
-        }
+        placedItems.forEach { placed -> placed.rect = rectOf(placed.index) }
 
-        // Visibility was decided against the pre-solve positions but rendering uses
-        // the solved ones: an item whose solved rect is on screen while its unsolved
-        // rect is not would stay uncomposed and pop in already deep on screen.
-        // Compose whatever the solved geometry says is actually visible, now.
-        val placedKeys = MutableScatterSet<Any>(placedItems.size)
-        placedItems.forEach { placedKeys.add(it.info.key) }
-        resolved.forEach { key, rect ->
-            if (!rect.overlaps(viewportRect) || placedKeys.contains(key)) return@forEach
-            val info = itemByKey[key] ?: return@forEach
-            // A measurable may be measured only once per pass: items already measured
-            // (ahead of the viewport, but not placed) are reused, everything else is
-            // composed fresh here.
+        // Visibility was decided pre-solve but rendering uses solved geometry:
+        // compose whatever the solved positions put on screen, or those items
+        // would pop in a frame late, already deep on screen.
+        for (index in infos.indices) {
+            if (!scratch.isResolved(index) || scratch.isPlaced(index)) continue
+            if (!overlaps(index, viewportRect)) continue
+            val info = infos[index]
+            val key = info.key
+
             val placeables = measuredPlaceables[key] ?: run {
                 val fresh = compose(itemProvider.composeIndexOf(key)).map { measurable ->
                     (measurable.parentData as? LazySurfaceAnimationSpecs)?.let { measuredSpecs[key] = it }
                     measurable.measure(UnboundedConstraints)
                 }
-                state.cacheMeasuredSize(
+                policy.cacheMeasuredSize(
                     key,
                     IntSize(
                         width = fresh.maxOfOrNull { it.width } ?: 0,
@@ -424,25 +456,25 @@ private fun LazyLayoutMeasureScope.measureLazySurfaceImpl(
                 )
                 fresh
             }
-            placedItems.add(PlacedSurfaceItem(info, rect, placeables, measuredSpecs[key]))
+            placedItems.add(PlacedSurfaceItem(info, index, rectOf(index), placeables, measuredSpecs[key]))
+            scratch.markPlaced(index)
         }
     }
 
     // ---- Item animations (Modifier.animateItem). ------------------------------------
-    // Purely visual: the logical rects keep feeding the clamp, the solver and the
-    // public state. Reading the animatables here makes their frames re-run the
-    // measure pass until everything settles.
-    state.passStamp++
-    val passStamp = state.passStamp
+    // Purely visual: logical rects keep feeding the clamp, solver and public state.
+    // Reading the animatables here re-runs the pass until they settle.
+    policy.passStamp++
+    val passStamp = policy.passStamp
     placedItems.forEach { placed ->
         val key = placed.info.key
         val specs = placed.animationSpecs
         if (specs == null) {
-            state.itemAnimations.remove(key)?.cancel()
+            policy.itemAnimations.remove(key)?.cancel()
             return@forEach
         }
         val target = placed.rect.topLeft
-        val animation = state.itemAnimations.getOrPut(key) {
+        val animation = policy.itemAnimations.getOrPut(key) {
             LazySurfaceItemAnimation(target, fadeIn = specs.fadeInSpec != null).also { created ->
                 specs.fadeInSpec?.let { spec ->
                     created.alphaJob = animationScope.launch {
@@ -458,16 +490,14 @@ private fun LazyLayoutMeasureScope.measureLazySurfaceImpl(
         if (glide) {
             if ((animation.position.targetValue - target).getDistanceSquared() > 0.25f) {
                 animation.positionJob = animationScope.launch {
-                    animation.position.animateTo(target, specs.placementSpec!!)
+                    animation.position.animateTo(target, specs.placementSpec)
                 }
             }
             placed.displayTopLeft = animation.position.value
         } else {
-            // First placement, re-entry, or no placement spec: draw at the target
-            // THIS frame, gliding in from a stale position would fly across the
-            // viewport. The animatable is aligned only in the background so a later
-            // glide starts from the right place, drawing from it here would flash
-            // one stale frame, the snap coroutine runs after this pass has rendered.
+            // First placement, re-entry, or no spec: draw at the target THIS frame,
+            // gliding from a stale position would fly across the viewport. The
+            // animatable snaps in the background so a later glide starts right.
             if (animation.position.value != target) {
                 animation.positionJob?.cancel()
                 animation.positionJob = animationScope.launch { animation.position.snapTo(target) }
@@ -477,44 +507,63 @@ private fun LazyLayoutMeasureScope.measureLazySurfaceImpl(
         placed.alpha = animation.alpha.value
     }
 
-    /**
-     * Content rects of the resolved items, by key. Their union is the *bounding
-     * shape* scrolling gets clamped to, growing as more of the graph resolves.
-     */
-    val marginBoxes = MutableScatterMap<Any, Rect>(resolved.size)
+    // ---- Publish boundary: the only place pass geometry becomes Rects. --------------
+    // Geometry-equal passes keep the previous maps untouched: republishing equal
+    // contents would re-record every visible layer each scroll frame, and building
+    // them would be the pass's only steady-state allocation.
+    if (scratch.publishedDiffers()) {
+        val freshResolved = MutableScatterMap<Any, Rect>(scratch.resolvedCount)
+        var boundsLeft = Float.POSITIVE_INFINITY
+        var boundsTop = Float.POSITIVE_INFINITY
+        var boundsRight = Float.NEGATIVE_INFINITY
+        var boundsBottom = Float.NEGATIVE_INFINITY
+        for (index in infos.indices) {
+            if (!scratch.isResolved(index)) continue
+            val rect = rectOf(index)
+            freshResolved[infos[index].key] = rect
+            if (rect.left < boundsLeft) boundsLeft = rect.left
+            if (rect.top < boundsTop) boundsTop = rect.top
+            if (rect.right > boundsRight) boundsRight = rect.right
+            if (rect.bottom > boundsBottom) boundsBottom = rect.bottom
+        }
+        scratch.snapshotPublished()
+        state.lastKnownRects = freshResolved
+        state.resolvedRects = freshResolved.asMap()
 
-    /** Bounding box of all resolved rects, informational only, never a clamp. */
-    var bounds: Rect? = null
-    resolved.forEach { key, rect ->
-        marginBoxes[key] = rect
-        bounds = bounds?.let {
-            Rect(
-                left = minOf(it.left, rect.left),
-                top = minOf(it.top, rect.top),
-                right = maxOf(it.right, rect.right),
-                bottom = maxOf(it.bottom, rect.bottom),
-            )
-        } ?: rect
+        state.resolvedBounds = if (freshResolved.isNotEmpty()) {
+            Rect(boundsLeft, boundsTop, boundsRight, boundsBottom)
+        } else {
+            null
+        }
     }
+    // Content rects double as the margin boxes since margins moved onto relations:
+    // the clamp's bounding shape is the same geometry the draw code reads.
+    state.resolvedMarginBoxes = state.lastKnownRects
 
-    // Publish only when something actually moved: the published rects are read by
-    // item draw code, so re-publishing identical contents would invalidate and
-    // re-record every visible item's layer on every frame of a plain scroll.
-    if (!resolved.rectContentEquals(state.lastKnownRects)) {
-        state.lastKnownRects = resolved
-        state.resolvedRects = resolved.asMap()
-    }
-    state.resolvedMarginBoxes = marginBoxes
+    // Awaiting items with their zero-size provisional rects: the resolution
+    // frontier, usually empty or tiny.
+    val awaitingMeasure: ScatterMap<Any, Rect> =
+        if (scratch.awaitingCount == 0 && state.provisionalPositions.awaitingMeasure.isEmpty()) {
+            state.provisionalPositions.awaitingMeasure
+        } else {
+            val fresh = MutableScatterMap<Any, Rect>(scratch.awaitingCount)
+            for (index in infos.indices) {
+                if (scratch.isAwaiting(index)) {
+                    fresh[infos[index].key] = Rect(Offset(left[index], top[index]), Size.Zero)
+                }
+            }
+            fresh
+        }
+
     state.provisionalPositions.update(
         infos = infos,
         graph = graph,
         itemByKey = itemByKey,
-        resolved = resolved,
+        resolved = state.lastKnownRects,
         awaitingMeasure = awaitingMeasure,
-        cachedSize = state::cachedSize,
+        cachedSize = policy::cachedSize,
         isRtl = isRtl,
     )
-    state.resolvedBounds = bounds
     state.visibleItemsInfo = placedItems.map { placed ->
         LazySurfaceVisibleItemInfo(
             key = placed.info.key,
@@ -528,11 +577,10 @@ private fun LazyLayoutMeasureScope.measureLazySurfaceImpl(
     }
 
     // ---- Prefetch: warm the items the viewport is heading towards. ----------------
-    // The offset delta between the last two passes predicts the travel direction,
-    // items inside the translated viewport get precomposed and premeasured during
-    // idle frame time. Predictions no longer ahead are cancelled.
-    val movement = center - state.previousPassCenter
-    state.previousPassCenter = center
+    // The last two passes' offset delta predicts travel, items inside the
+    // translated viewport precompose during idle time, stale predictions cancel.
+    val movement = center - policy.previousPassCenter
+    policy.previousPassCenter = center
     if (movement != Offset.Zero) {
         val lookahead = Offset(
             x = (movement.x * PrefetchLookaheadPasses).coerceIn(-2 * halfWidth, 2 * halfWidth),
@@ -543,20 +591,22 @@ private fun LazyLayoutMeasureScope.measureLazySurfaceImpl(
         /** Items predicted to enter the viewport soon, not visible yet. */
         val wanted = MutableScatterSet<Any>(MaxPrefetchedItems)
         var budget = MaxPrefetchedItems
-        resolved.forEach { key, rect ->
-            if (budget > 0 && rect.overlaps(prefetchRect) && !rect.overlaps(viewportRect)) {
-                wanted.add(key)
+        for (index in infos.indices) {
+            if (budget <= 0) break
+            if (!scratch.isResolved(index)) continue
+            if (overlaps(index, prefetchRect) && !overlaps(index, viewportRect)) {
+                wanted.add(infos[index].key)
                 budget--
             }
         }
-        state.prefetchHandles.removeIf { key, handle ->
+        policy.prefetchHandles.removeIf { key, handle ->
             val stale = !wanted.contains(key)
             if (stale) handle.cancel() // no-op if it already ran
             stale
         }
         wanted.forEach { key ->
-            if (!state.prefetchHandles.containsKey(key)) {
-                state.prefetchHandles[key] = state.prefetchState.schedulePrecompositionAndPremeasure(
+            if (!policy.prefetchHandles.containsKey(key)) {
+                policy.prefetchHandles[key] = policy.prefetchState.schedulePrecompositionAndPremeasure(
                     index = itemProvider.composeIndexOf(key),
                     constraints = UnboundedConstraints,
                 )
@@ -567,11 +617,10 @@ private fun LazyLayoutMeasureScope.measureLazySurfaceImpl(
     /** Window-pixel point items are placed relative to: the middle of the viewport. */
     val viewportCenter = viewportSize.center
 
-    // Rounding each item's viewport-relative position independently makes neighbours
-    // cross rounding boundaries on different frames: a ±1px relative shimmer during
-    // every scroll. Rounding the shared scroll term ONCE per pass and each item's
-    // scaled surface position separately keeps every pair of items a constant
-    // integer distance apart, the whole field translates by the same integer.
+    // Rounding each item's viewport position independently makes neighbours cross
+    // rounding boundaries on different frames, a ±1px shimmer while scrolling.
+    // Rounding the shared scroll term ONCE keeps item pairs a constant integer
+    // distance apart, the whole field translates together.
     val scrollX = (center.x * zoom).roundToInt()
     val scrollY = (center.y * zoom).roundToInt()
     return layout(width = viewportSize.width, height = viewportSize.height) {
@@ -593,25 +642,151 @@ private fun LazyLayoutMeasureScope.measureLazySurfaceImpl(
 }
 
 /**
- * Pass-local scratch containers, held on the state and reused across measure passes:
- * cleared at each pass start so steady-state scrolling performs no scratch
- * allocation. Safe because measure passes never overlap.
+ * Index-addressed per-pass state, rebuilt only on content change (see
+ * [LazySurfaceMeasurePolicy.ensureContent]). Geometry is four flat float arrays,
+ * and the membership sets (resolved, awaiting, deferred, placed) are stamp checks
+ * against the pass number, so [beginPass] invalidates them all in O(1) and passes
+ * allocate nothing here. Stamp wrap-around would need 2^31 passes in one session.
+ */
+internal class ResolveScratch(val itemCount: Int) {
+    /** Content geometry by index, meaningful where a stamp below is current. */
+    val left = FloatArray(itemCount)
+    val top = FloatArray(itemCount)
+    val width = FloatArray(itemCount)
+    val height = FloatArray(itemCount)
+
+    /** Cached measured sizes, mirror of the key-addressed cache, -1 = never measured. */
+    val cachedWidth = IntArray(itemCount) { -1 }
+    val cachedHeight = IntArray(itemCount)
+
+    /** The current pass number, the value every live stamp must equal. */
+    var pass = 0
+        private set
+
+    /** Read-only outside this class and the solver, mutate via [markResolved]. */
+    val resolvedStamp = IntArray(itemCount)
+    private val awaitingStamp = IntArray(itemCount)
+    private val deferredStamp = IntArray(itemCount)
+    private val placedStamp = IntArray(itemCount)
+
+    var resolvedCount = 0
+        private set
+    var awaitingCount = 0
+        private set
+    var deferredCount = 0
+        private set
+
+    /** The BFS work list: a growing int list drained by a moving head cursor. */
+    private val queue = MutableIntList(64)
+    private var queueHead = 0
+
+    fun beginPass() {
+        pass++
+        resolvedCount = 0
+        awaitingCount = 0
+        deferredCount = 0
+        queue.clear()
+        queueHead = 0
+    }
+
+    fun isResolved(index: Int) = resolvedStamp[index] == pass
+    fun markResolved(index: Int) {
+        if (resolvedStamp[index] != pass) {
+            resolvedStamp[index] = pass
+            resolvedCount++
+        }
+    }
+
+    fun isAwaiting(index: Int) = awaitingStamp[index] == pass
+    fun park(index: Int) {
+        if (awaitingStamp[index] != pass) {
+            awaitingStamp[index] = pass
+            awaitingCount++
+        }
+    }
+
+    fun unpark(index: Int) {
+        if (awaitingStamp[index] == pass) {
+            awaitingStamp[index] = 0
+            awaitingCount--
+        }
+    }
+
+    fun isDeferred(index: Int) = deferredStamp[index] == pass
+    fun defer(index: Int) {
+        if (deferredStamp[index] != pass) {
+            deferredStamp[index] = pass
+            deferredCount++
+        }
+    }
+
+    fun undefer(index: Int) {
+        if (deferredStamp[index] == pass) {
+            deferredStamp[index] = 0
+            deferredCount--
+        }
+    }
+
+    fun isPlaced(index: Int) = placedStamp[index] == pass
+    fun markPlaced(index: Int) {
+        placedStamp[index] = pass
+    }
+
+    fun enqueueAll(indices: IntList) {
+        for (i in 0 until indices.size) queue.add(indices[i])
+    }
+
+    fun hasQueuedItems() = queueHead < queue.size
+    fun dequeue(): Int = queue[queueHead++]
+
+    fun setCachedSize(index: Int, size: IntSize) {
+        cachedWidth[index] = size.width
+        cachedHeight[index] = size.height
+    }
+
+    // Snapshot of what the published state maps hold, the publish boundary's
+    // change gate.
+    private val publishedLeft = FloatArray(itemCount)
+    private val publishedTop = FloatArray(itemCount)
+    private val publishedWidth = FloatArray(itemCount)
+    private val publishedHeight = FloatArray(itemCount)
+    private val publishedResolved = BooleanArray(itemCount)
+    private var publishedValid = false
+
+    /** Whether this pass's resolved geometry differs from the published snapshot. */
+    fun publishedDiffers(): Boolean {
+        if (!publishedValid) return true
+        for (i in 0 until itemCount) {
+            val resolved = resolvedStamp[i] == pass
+            if (resolved != publishedResolved[i]) return true
+            if (resolved &&
+                (left[i] != publishedLeft[i] || top[i] != publishedTop[i] ||
+                    width[i] != publishedWidth[i] || height[i] != publishedHeight[i])
+            ) {
+                return true
+            }
+        }
+        return false
+    }
+
+    fun snapshotPublished() {
+        left.copyInto(publishedLeft)
+        top.copyInto(publishedTop)
+        width.copyInto(publishedWidth)
+        height.copyInto(publishedHeight)
+        for (i in 0 until itemCount) publishedResolved[i] = resolvedStamp[i] == pass
+        publishedValid = true
+    }
+}
+
+/**
+ * Key-addressed pass scratch, reused across passes (measure passes never overlap).
+ * Only composed items touch these.
  */
 internal class MeasureScratch {
-    /** Work list of item keys whose positioning source just resolved. */
-    val queue = ArrayDeque<Any>()
-
     /**
-     * Items waiting for a constraint endpoint that has not resolved *yet*: an item
-     * is positioned against ALL of its declared relations together, so it must not
-     * resolve while one of them might still arrive this pass.
-     */
-    val deferred = MutableScatterSet<Any>()
-
-    /**
-     * Every placeable list measured this pass, by item key. A measurable may only be
-     * measured once per pass, so the post-solve visibility sweep must reuse these for
-     * items that were measured ahead of the viewport but not placed.
+     * Placeables measured this pass, by key. A measurable may only be measured
+     * once per pass, so the post-solve visibility sweep reuses these.
      */
     val measuredPlaceables = MutableScatterMap<Any, List<Placeable>>()
 
@@ -619,8 +794,6 @@ internal class MeasureScratch {
     val measuredSpecs = MutableScatterMap<Any, LazySurfaceAnimationSpecs>()
 
     fun reset() {
-        queue.clear()
-        deferred.clear()
         measuredPlaceables.clear()
         measuredSpecs.clear()
     }
@@ -629,6 +802,8 @@ internal class MeasureScratch {
 /** A resolved, composed item that intersects the viewport, ready to be placed. */
 private class PlacedSurfaceItem(
     val info: LazySurfaceItemInfo,
+    /** The item's registration index, its slot in the pass arrays. */
+    val index: Int,
     /** Content rect, mutable because the constraint pass may refine it. */
     var rect: Rect,
     val placeables: List<Placeable>,
@@ -643,26 +818,29 @@ private class PlacedSurfaceItem(
 }
 
 /**
- * Pure placement math: the top-left of an item of [size] placed on [side] of
- * [anchorRect] (or centered on it when [side] is `null`), with [relationMargin] as
- * the gap. [side] and, for vertical relations, the cross-axis [alignment] are
- * direction-relative, [isRtl] resolves them to absolute surface geometry. Returns
- * an [Offset] (a value class) so the per-frame resolution can call it for every
- * constraint of every item without allocating, [placeItemRect] wraps it for callers
- * that want the full rect.
+ * Pure placement math: the top-left of a `sizeWidth x sizeHeight` item placed on
+ * [side] of the anchor edges (centered on them when [side] is null), with
+ * [relationMargin] as the gap. [isRtl] resolves direction-relative sides and
+ * alignments to absolute geometry.
  */
 internal fun placeItemTopLeft(
-    anchorRect: Rect,
+    anchorLeft: Float,
+    anchorTop: Float,
+    anchorRight: Float,
+    anchorBottom: Float,
     side: LazySurfaceNeighbor.Side?,
     alignment: LazySurfaceNeighbor.Alignment,
-    size: Size,
+    sizeWidth: Float,
+    sizeHeight: Float,
     isRtl: Boolean,
-    relationMargin: Float = 0f,
+    relationMargin: Float,
 ): Offset {
+    val anchorCenterX = anchorLeft + (anchorRight - anchorLeft) / 2f
+    val anchorCenterY = anchorTop + (anchorBottom - anchorTop) / 2f
     if (side == null) {
         return Offset(
-            x = anchorRect.center.x - size.width / 2f,
-            y = anchorRect.center.y - size.height / 2f,
+            x = anchorCenterX - sizeWidth / 2f,
+            y = anchorCenterY - sizeHeight / 2f,
         )
     }
 
@@ -674,37 +852,58 @@ internal fun placeItemTopLeft(
             // depends on the layout direction.
             val onAbsoluteRight = (side == LazySurfaceNeighbor.Side.End) != isRtl
             x = if (onAbsoluteRight) {
-                anchorRect.right + relationMargin
+                anchorRight + relationMargin
             } else {
-                anchorRect.left - relationMargin - size.width
+                anchorLeft - relationMargin - sizeWidth
             }
             y = when (alignment) {
-                LazySurfaceNeighbor.Alignment.Start -> anchorRect.top
+                LazySurfaceNeighbor.Alignment.Start -> anchorTop
                 // Free never positions, the Center value is only read by the hard
                 // separation math, which ignores this axis.
                 LazySurfaceNeighbor.Alignment.Center,
-                LazySurfaceNeighbor.Alignment.Free -> anchorRect.center.y - size.height / 2f
-                LazySurfaceNeighbor.Alignment.End -> anchorRect.bottom - size.height
+                LazySurfaceNeighbor.Alignment.Free -> anchorCenterY - sizeHeight / 2f
+                LazySurfaceNeighbor.Alignment.End -> anchorBottom - sizeHeight
             }
         }
         LazySurfaceNeighbor.Side.Top, LazySurfaceNeighbor.Side.Bottom -> {
             y = if (side == LazySurfaceNeighbor.Side.Bottom) {
-                anchorRect.bottom + relationMargin
+                anchorBottom + relationMargin
             } else {
-                anchorRect.top - relationMargin - size.height
+                anchorTop - relationMargin - sizeHeight
             }
             x = when (alignment) {
                 LazySurfaceNeighbor.Alignment.Start ->
-                    if (isRtl) anchorRect.right - size.width else anchorRect.left
+                    if (isRtl) anchorRight - sizeWidth else anchorLeft
                 LazySurfaceNeighbor.Alignment.Center,
-                LazySurfaceNeighbor.Alignment.Free -> anchorRect.center.x - size.width / 2f
+                LazySurfaceNeighbor.Alignment.Free -> anchorCenterX - sizeWidth / 2f
                 LazySurfaceNeighbor.Alignment.End ->
-                    if (isRtl) anchorRect.left else anchorRect.right - size.width
+                    if (isRtl) anchorLeft else anchorRight - sizeWidth
             }
         }
     }
     return Offset(x, y)
 }
+
+/** The primitive [placeItemTopLeft] for callers that hold an anchor [Rect]. */
+internal fun placeItemTopLeft(
+    anchorRect: Rect,
+    side: LazySurfaceNeighbor.Side?,
+    alignment: LazySurfaceNeighbor.Alignment,
+    size: Size,
+    isRtl: Boolean,
+    relationMargin: Float = 0f,
+): Offset = placeItemTopLeft(
+    anchorLeft = anchorRect.left,
+    anchorTop = anchorRect.top,
+    anchorRight = anchorRect.right,
+    anchorBottom = anchorRect.bottom,
+    side = side,
+    alignment = alignment,
+    sizeWidth = size.width,
+    sizeHeight = size.height,
+    isRtl = isRtl,
+    relationMargin = relationMargin,
+)
 
 /** [placeItemTopLeft] as a full content rect, for the non-hot-path callers. */
 internal fun placeItemRect(
@@ -721,16 +920,13 @@ internal fun placeItemRect(
 
 /**
  * Items are measured with no bounds at all, their content is what defines their size.
- * Note that fill modifiers are documented no-ops under unbounded constraints, and
- * children requiring bounded constraints (scrollable containers) throw Compose's
- * standard infinity-constraints exception.
  */
 private val UnboundedConstraints = Constraints()
 
 /** How many extra viewports on each side of the visible one get resolved ahead of time. */
 private const val ResolutionViewports = 1
 
-/** Caps how many forced measurements a single pass may spend, see the approach loop. */
+
 private const val MaxApproachMeasurementsPerPass = 32
 
 /**
@@ -739,60 +935,149 @@ private const val MaxApproachMeasurementsPerPass = 32
  */
 private const val PrefetchLookaheadPasses = 8
 
-/** How many prefetch requests may be alive at once. */
+
 private const val MaxPrefetchedItems = 4
 
-/** Floor for the zoom factor in measure math, guarding against division by zero. */
+
 private const val MinZoom = 1e-4f
 
-/** Structural equality for resolved-rect maps, allocation free. */
-private fun ScatterMap<Any, Rect>.rectContentEquals(other: ScatterMap<Any, Rect>): Boolean {
-    if (size != other.size) return false
-    var equal = true
-    forEach { key, value -> if (equal && other[key] != value) equal = false }
-    return equal
-}
-
 /**
- * Last pass's solve, kept on the state. The solver is a pure function of (positions,
- * constraint templates, direction), so a pass deriving the same joint placements as
- * the previous one (every frame of a plain scroll) replays the previous refinement
- * for the cost of two O(n) map walks, sweeps only run when geometry actually changed.
+ * Last pass's solve. The solver is a pure function of (positions, templates,
+ * direction), so a pass deriving the same joint placements as the previous one
+ * (every frame of a plain scroll) replays the refinement for two O(n) array walks.
  */
 internal class SolveMemo {
-    val preSolve = MutableScatterMap<Any, Rect>()
-    val postSolve = MutableScatterMap<Any, Rect>()
     var constraints: List<RelationConstraint>? = null
     var isRtl = false
     var moved = false
+    var valid = false
+
+    /** Which indices were resolved when the memo was taken, pre == post. */
+    var resolvedFlags = BooleanArray(0)
+        private set
+
+    /*
+     * pre*: resolved slot's geometry as resolution derived it, snapshotted before
+     * the solve. A pass matching this snapshot (same resolved set, same templates,
+     * same direction) skips the sweeps entirely.
+     */
+
+    var preLeft = FloatArray(0)
+        private set
+    var preTop = FloatArray(0)
+        private set
+    var preWidth = FloatArray(0)
+        private set
+    var preHeight = FloatArray(0)
+        private set
+
+    /*
+     * post*: the same slots after the solve, replayed into the scratch on a memo
+     * hit. Resolved slots only, awaiting items keep their provisional geometry.
+     */
+
+    var postLeft = FloatArray(0)
+        private set
+    var postTop = FloatArray(0)
+        private set
+    var postWidth = FloatArray(0)
+        private set
+    var postHeight = FloatArray(0)
+        private set
 
     /** The templates compiled for the sweep hot path, see [CompiledConstraints]. */
     var compiled: CompiledConstraints? = null
+
+    fun ensureCapacity(itemCount: Int) {
+        if (resolvedFlags.size == itemCount)
+            return
+
+        resolvedFlags = BooleanArray(itemCount)
+        preLeft = FloatArray(itemCount)
+        preTop = FloatArray(itemCount)
+        preWidth = FloatArray(itemCount)
+        preHeight = FloatArray(itemCount)
+        postLeft = FloatArray(itemCount)
+        postTop = FloatArray(itemCount)
+        postWidth = FloatArray(itemCount)
+        postHeight = FloatArray(itemCount)
+        valid = false
+    }
 }
 
-/** [CompiledConstraints.solve] behind the [SolveMemo], same contract, same result. */
+/**
+ * [CompiledConstraints.solveInto] behind the [SolveMemo], same contract, same
+ * result, in place on [scratch]'s arrays. Only the resolved slots are snapshotted
+ * and replayed: awaiting items keep their provisional geometry either way.
+ */
 internal fun solveMemoized(
     memo: SolveMemo,
-    resolved: MutableScatterMap<Any, Rect>,
+    scratch: ResolveScratch,
     constraints: List<RelationConstraint>,
+    itemIndexOf: ObjectIntMap<Any>,
     isRtl: Boolean,
 ): Boolean {
+    val itemCount = scratch.itemCount
+    memo.ensureCapacity(itemCount)
+    val left = scratch.left
+    val top = scratch.top
+    val width = scratch.width
+    val height = scratch.height
+
     // Templates are rebuilt only on content change, so identity captures them.
-    if (memo.constraints === constraints && memo.isRtl == isRtl &&
-        resolved.rectContentEquals(memo.preSolve)
-    ) {
-        memo.postSolve.forEach { key, value -> resolved[key] = value }
-        return memo.moved
+    if (memo.valid && memo.constraints === constraints && memo.isRtl == isRtl) {
+        var inputsMatch = true
+        for (i in 0 until itemCount) {
+            val resolved = scratch.isResolved(i)
+            if (resolved != memo.resolvedFlags[i]) {
+                inputsMatch = false
+                break
+            }
+            if (resolved &&
+                (left[i] != memo.preLeft[i] || top[i] != memo.preTop[i] ||
+                    width[i] != memo.preWidth[i] || height[i] != memo.preHeight[i])
+            ) {
+                inputsMatch = false
+                break
+            }
+        }
+        if (inputsMatch) {
+            for (i in 0 until itemCount) {
+                if (memo.resolvedFlags[i]) {
+                    left[i] = memo.postLeft[i]
+                    top[i] = memo.postTop[i]
+                    width[i] = memo.postWidth[i]
+                    height[i] = memo.postHeight[i]
+                }
+            }
+            return memo.moved
+        }
     }
+
     val compiled = memo.compiled?.takeIf { it.source === constraints && it.isRtl == isRtl }
-        ?: CompiledConstraints(constraints, isRtl).also { memo.compiled = it }
-    memo.preSolve.clear()
-    resolved.forEach { key, value -> memo.preSolve[key] = value }
-    val moved = compiled.solve(resolved)
-    memo.postSolve.clear()
-    resolved.forEach { key, value -> memo.postSolve[key] = value }
+        ?: CompiledConstraints(constraints, isRtl, itemIndexOf, itemCount).also { memo.compiled = it }
+    for (i in 0 until itemCount) {
+        val resolved = scratch.isResolved(i)
+        memo.resolvedFlags[i] = resolved
+        if (resolved) {
+            memo.preLeft[i] = left[i]
+            memo.preTop[i] = top[i]
+            memo.preWidth[i] = width[i]
+            memo.preHeight[i] = height[i]
+        }
+    }
+    val moved = compiled.solveInto(left, top, width, height, scratch.resolvedStamp, scratch.pass)
+    for (i in 0 until itemCount) {
+        if (memo.resolvedFlags[i]) {
+            memo.postLeft[i] = left[i]
+            memo.postTop[i] = top[i]
+            memo.postWidth[i] = width[i]
+            memo.postHeight[i] = height[i]
+        }
+    }
     memo.constraints = constraints
     memo.isRtl = isRtl
     memo.moved = moved
+    memo.valid = true
     return moved
 }

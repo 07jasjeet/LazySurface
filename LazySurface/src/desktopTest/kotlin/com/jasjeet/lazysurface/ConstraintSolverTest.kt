@@ -46,7 +46,7 @@ class ConstraintSolverTest {
 
     private fun solve(rects: MutableScatterMap<Any, Rect>): Boolean {
         val infos = latticeInfos()
-        return CompiledConstraints(
+        return MapSolver(
             buildRelationConstraints(infos, infos.associateBy { it.key as Any }.toScatterMap()),
             isRtl = false,
         ).solve(rects)
@@ -122,7 +122,7 @@ class ConstraintSolverTest {
             size,
         )
 
-        CompiledConstraints(
+        MapSolver(
             buildRelationConstraints(infos, infos.associateBy { it.key as Any }.toScatterMap()),
             isRtl = false,
         ).solve(rects)

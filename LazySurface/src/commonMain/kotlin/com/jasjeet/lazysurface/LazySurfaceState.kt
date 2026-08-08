@@ -1,8 +1,11 @@
 package com.jasjeet.lazysurface
 
 import kotlin.time.TimeSource
+import androidx.collection.MutableIntList
+import androidx.collection.MutableObjectIntMap
 import androidx.collection.MutableScatterMap
 import androidx.collection.MutableScatterSet
+import androidx.collection.ObjectIntMap
 import androidx.collection.ScatterMap
 import androidx.collection.mutableScatterMapOf
 import androidx.compose.animation.core.AnimationSpec
@@ -53,11 +56,19 @@ internal class ResolvedContentPadding(
  */
 internal class PositioningEdge(
     val sourceKey: Any,
+    /** [sourceKey]'s registration index, [PivotIndex] for the pivot. */
+    val sourceIndex: Int,
     val sideOfSource: LazySurfaceNeighbor.Side?,
     val alignment: LazySurfaceNeighbor.Alignment,
     /** The relation's own margin, the same from either endpoint's perspective. */
     val margin: Float,
 )
+
+/**
+ * The pivot's pseudo index in the registration index space: it is not an item, so
+ * it owns no slot in the per-pass arrays, its anchor rect is [Rect.Zero] by fiat.
+ */
+internal const val PivotIndex = -1
 
 /**
  * One key's place in the relation graph, derived from the effective (healed)
@@ -73,6 +84,9 @@ internal class GraphNode {
 
     /** Keys this node can position once resolved, its BFS successors. */
     val dependents = ArrayList<Any>(2)
+
+    /** [dependents] as registration indices, the measure pass's int work list. */
+    val dependentIndices = MutableIntList(2)
 
     /**
      * Undirected adjacency for routing and the stranded walk: symmetric regardless
@@ -236,18 +250,27 @@ class LazySurfaceState(
     internal var relationConstraints: List<RelationConstraint> = emptyList()
         private set
 
+    /**
+     *  Registration index of every live key: the dense index space the per-pass
+     * arrays and the solver run on, `infos[i]` answers to index `i`.
+     */
+    internal var itemIndexOf: ObjectIntMap<Any> = MutableObjectIntMap()
+        private set
+
+    /** Graph node per registration index, null for items with no relations. */
+    internal var nodeAt: Array<GraphNode?> = emptyArray()
+        private set
+
+    /** The pivot's node, the resolution BFS seed, kept out of the index space. */
+    internal var pivotNode: GraphNode? = null
+        private set
+
     var zoom by mutableFloatStateOf(initialZoom)
         internal set
 
     /** Surface-space point currently at the center of the viewport. Pivot is at [Offset.Zero]. */
     var offset by mutableStateOf(initialOffset)
         private set
-
-    /**
-     * Where the viewport center was on the previous measure pass. The delta to the
-     * current center is the movement direction used to predict what to prefetch.
-     */
-    internal var previousPassCenter: Offset = Offset.Zero
 
     /**
      * The most blank space allowed between each content edge and the matching viewport
@@ -257,36 +280,6 @@ class LazySurfaceState(
      * viewport center.
      */
     internal var contentPaddingPx: ResolvedContentPadding? = null
-
-    /** Live prefetch requests, keyed by the item they warm. */
-    @OptIn(ExperimentalFoundationApi::class)
-    internal val prefetchHandles = MutableScatterMap<Any, LazyLayoutPrefetchState.PrefetchHandle>()
-
-    /** Reusable measure-pass scratch, see [MeasureScratch]. */
-    internal val measureScratch = MeasureScratch()
-
-    /** Previous pass's solve, replayed when its inputs recur, see [SolveMemo]. */
-    internal val solveMemo = SolveMemo()
-
-    /** Live [LazySurfaceItemScope.animateItem] records, keyed by item. */
-    internal val itemAnimations = MutableScatterMap<Any, LazySurfaceItemAnimation>()
-
-    /**
-     * Monotonic measure-pass counter: placement animations glide only between
-     * consecutive placements, so items re-entering the viewport snap instead of
-     * flying in from stale positions.
-     */
-    internal var passStamp = 0
-
-    // Content is the only source of an item's size, so nothing is known about an
-    // item until its first measurement.
-    private val measuredSizes = MutableScatterMap<Any, IntSize>()
-
-    internal fun cachedSize(key: Any): IntSize? = measuredSizes[key]
-
-    internal fun cacheMeasuredSize(key: Any, size: IntSize) {
-        measuredSizes[key] = size
-    }
 
     /**
      * Anchors of removed items, the relation graph's tombstones. A live relation
@@ -330,6 +323,14 @@ class LazySurfaceState(
 
             itemsInfo = infos
             itemByKey = newItemByKey
+
+            // Registration order is the index space: infos[i] answers to index i,
+            // edges carry their source's index so the pass never hashes a key.
+            val newItemIndexOf = MutableObjectIntMap<Any>(infos.size)
+            infos.forEachIndexed { i, info -> newItemIndexOf[info.key] = i }
+            fun indexOf(key: Any): Int =
+                if (key === LazySurfacePivot) PivotIndex
+                else newItemIndexOf.getOrDefault(key, PivotIndex)
 
             /** Tombstones some chase walked through this update still needed. */
             val usedTombstones = MutableScatterSet<Any>()
@@ -413,30 +414,34 @@ class LazySurfaceState(
                     // "The neighbour sits on side S of me" -> I sit on the opposite
                     // side of it.
                     itemNode.ownConstraints.add(
-                        PositioningEdge(neighborKey, neighbor.side?.opposite(), neighbor.alignment, neighbor.margin)
+                        PositioningEdge(
+                            neighborKey, indexOf(neighborKey),
+                            neighbor.side?.opposite(), neighbor.alignment, neighbor.margin,
+                        )
                     )
                     neighborNode.dependents.add(info.key)
+                    neighborNode.dependentIndices.add(indexOf(info.key))
                     if (neighborKey !== LazySurfacePivot) {
                         neighborNode.fallbackConstraints.add(
-                            PositioningEdge(info.key, neighbor.side, neighbor.alignment, neighbor.margin)
+                            PositioningEdge(
+                                info.key, indexOf(info.key),
+                                neighbor.side, neighbor.alignment, neighbor.margin,
+                            )
                         )
                         itemNode.dependents.add(neighborKey)
+                        itemNode.dependentIndices.add(indexOf(neighborKey))
                     }
                 }
             }
             graph = newGraph
+            itemIndexOf = newItemIndexOf
+            nodeAt = Array(infos.size) { newGraph[infos[it].key] }
+            pivotNode = newGraph[LazySurfacePivot]
             relationConstraints = buildRelationConstraints(infos, newItemByKey) {
                 effective[it.key] ?: it.neighbors
             }
-            // Sizes measured for items that no longer exist must not keep influencing
-            // resolution or the bounding box.
-            measuredSizes.removeIf { key, _ -> !newItemByKey.containsKey(key) }
-            // Removed items take their animation records with them.
-            itemAnimations.removeIf { key, animation ->
-                val removed = !newItemByKey.containsKey(key)
-                if (removed) animation.cancel()
-                removed
-            }
+            // Content-sized measure structures live on [LazySurfaceMeasurePolicy],
+            // re-derived there behind its own identity gate on the same infos.
         }
     }
 
@@ -662,9 +667,6 @@ class LazySurfaceState(
         val boxes: List<Rect>,
     )
 
-    @OptIn(ExperimentalFoundationApi::class)
-    internal val prefetchState = LazyLayoutPrefetchState()
-
     /**
      * Timestamp of the last velocity sample. Two samples in the same millisecond give
      * the tracker's polynomial fit a zero time delta, which produces NaN velocities,
@@ -757,8 +759,8 @@ class LazySurfaceState(
      * Animates [zoom] from its current value to [targetZoom], keeping the surface point at
      * the viewport centre fixed (the same anchor the placement math zooms around). Runs
      * through the same gesture mutex as [animateToItem], so a user touch interrupts it.
-     * The value is applied as-is — stay within the zoom range the surface was given, the
-     * way the pinch gesture does.
+     * The value is applied as-is, stay within the zoom range the surface was given,
+     * the way the pinch gesture does.
      */
     suspend fun animateZoomTo(
         targetZoom: Float,

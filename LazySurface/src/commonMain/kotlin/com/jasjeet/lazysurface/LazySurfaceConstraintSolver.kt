@@ -1,10 +1,8 @@
 package com.jasjeet.lazysurface
 
 import androidx.collection.MutableLongIntMap
-import androidx.collection.MutableObjectIntMap
-import androidx.collection.MutableScatterMap
+import androidx.collection.ObjectIntMap
 import androidx.collection.ScatterMap
-import androidx.compose.ui.geometry.Rect
 import kotlin.math.abs
 import kotlin.math.max
 
@@ -54,13 +52,14 @@ internal fun buildRelationConstraints(
 }
 
 /**
- * The constraint templates compiled for the sweep hot path, plus the scratch the
- * sweeps run on. Compiled once per content change (and on direction change) and
- * reused by every solve, not thread safe, like the measure pass that owns it.
+ * The constraint templates compiled for the sweep hot path. Compiled once per
+ * content change (and on direction change) and reused by every solve, not thread
+ * safe, like the measure pass that owns it.
  *
- * **Primitive layout.** Endpoints become indices into flat position/extent arrays,
- * sides and alignments resolve against the layout direction at compile time, so a
- * sweep is pure float arithmetic. Sums are grouped differently than the naive
+ * **Primitive layout.** Endpoints compile to the caller's [keyIndex] slots, sides
+ * and alignments resolve against the layout direction at compile time, so a sweep
+ * is pure float arithmetic and [solveInto] corrects the caller's arrays in place
+ * with no load or write-back step. Sums are grouped differently than the naive
  * per-sweep math, so results can differ from it in the last float bit, orders of
  * magnitude below [SolverConvergedPx].
  *
@@ -75,6 +74,8 @@ internal fun buildRelationConstraints(
 internal class CompiledConstraints(
     val source: List<RelationConstraint>,
     val isRtl: Boolean,
+    keyIndex: ObjectIntMap<Any>,
+    keyCount: Int,
 ) {
     /** Cross-axis alignment resolved to absolute geometry at compile time. */
     private companion object {
@@ -86,8 +87,6 @@ internal class CompiledConstraints(
 
     private val constraintCount = source.size
 
-    /** Unique constraint endpoints, index-addressed everywhere below. */
-    private val keys = ArrayList<Any>()
     private val itemIdx = IntArray(constraintCount)
     private val neighborIdx = IntArray(constraintCount)
     private val horizontal = BooleanArray(constraintCount)
@@ -102,28 +101,18 @@ internal class CompiledConstraints(
     private val adjacencyStart: IntArray
     private val adjacency: IntArray
 
-    // Per-solve scratch, sized once: positions/extents by endpoint index.
-    private val x: FloatArray
-    private val y: FloatArray
-    private val w: FloatArray
-    private val h: FloatArray
-    private val present: BooleanArray
-    private val movedEver: BooleanArray
-
     /** Sweep number up to which each constraint stays active. */
     private val activeStamp = IntArray(constraintCount)
 
-    /** Sweeps the last [solve] actually ran, across both phases, a diagnostic. */
+    /** Sweeps the last solve actually ran, across both phases, a diagnostic. */
     var lastSolveSweeps: Int = 0
         private set
 
     init {
-        val keyIndex = MutableObjectIntMap<Any>()
         fun indexOf(key: Any): Int {
-            val existing = keyIndex.getOrDefault(key, -1)
-            if (existing >= 0) return existing
-            keys.add(key)
-            return (keys.size - 1).also { keyIndex[key] = it }
+            val index = keyIndex.getOrDefault(key, -1)
+            check(index >= 0) { "constraint endpoint $key is missing from the key index" }
+            return index
         }
 
         source.forEachIndexed { i, constraint ->
@@ -180,7 +169,6 @@ internal class CompiledConstraints(
             }
         }
 
-        val keyCount = keys.size
         adjacencyStart = IntArray(keyCount + 1)
         for (i in 0 until constraintCount) {
             adjacencyStart[itemIdx[i] + 1]++
@@ -193,18 +181,13 @@ internal class CompiledConstraints(
             adjacency[cursor[itemIdx[i]]++] = i
             adjacency[cursor[neighborIdx[i]]++] = i
         }
-
-        x = FloatArray(keyCount)
-        y = FloatArray(keyCount)
-        w = FloatArray(keyCount)
-        h = FloatArray(keyCount)
-        present = BooleanArray(keyCount)
-        movedEver = BooleanArray(keyCount)
     }
 
     /**
      * The global constraint pass: projected Gauss–Seidel sweeps over every declared
-     * relation whose two endpoints both resolved this pass. Each relation contributes:
+     * relation whose two endpoints both resolved this pass, correcting [x]/[y] in
+     * place. An endpoint participates when its [presentStamp] slot equals [stamp].
+     * Each relation contributes:
      *  - **Hard separation** along the relation's axis: the item may sit *farther*
      *    from its neighbour than declared, never closer. Violations are corrected
      *    fully, split between both endpoints, the split is what propagates a push
@@ -233,20 +216,15 @@ internal class CompiledConstraints(
      *
      * @return whether any position moved beyond the convergence threshold.
      */
-    fun solve(resolved: MutableScatterMap<Any, Rect>): Boolean {
+    fun solveInto(
+        x: FloatArray,
+        y: FloatArray,
+        w: FloatArray,
+        h: FloatArray,
+        presentStamp: IntArray,
+        stamp: Int,
+    ): Boolean {
         if (constraintCount == 0) return false
-
-        for (j in keys.indices) {
-            val rect = resolved[keys[j]]
-            present[j] = rect != null
-            movedEver[j] = false
-            if (rect != null) {
-                x[j] = rect.left
-                y[j] = rect.top
-                w[j] = rect.right - rect.left
-                h[j] = rect.bottom - rect.top
-            }
-        }
 
         var anyMoved = false
         var sweepNo = 1
@@ -258,7 +236,7 @@ internal class CompiledConstraints(
             var previous = Float.POSITIVE_INFINITY
             var stalled = 0
             while (remaining-- > 0) {
-                val correction = sweep(sweepNo++, softConstraints)
+                val correction = sweep(x, y, w, h, presentStamp, stamp, sweepNo++, softConstraints)
                 lastSolveSweeps++
                 if (correction <= SolverConvergedPx) return
                 anyMoved = true
@@ -276,11 +254,6 @@ internal class CompiledConstraints(
         // guarantee and converges monotonically, since separations only grow here.
         phase(HardOnlySweeps, softConstraints = false)
 
-        for (j in keys.indices) {
-            if (present[j] && movedEver[j]) {
-                resolved[keys[j]] = Rect(x[j], y[j], x[j] + w[j], y[j] + h[j])
-            }
-        }
         return anyMoved
     }
 
@@ -290,13 +263,22 @@ internal class CompiledConstraints(
      *
      * @return the largest correction applied.
      */
-    private fun sweep(sweepNo: Int, softConstraints: Boolean): Float {
+    private fun sweep(
+        x: FloatArray,
+        y: FloatArray,
+        w: FloatArray,
+        h: FloatArray,
+        presentStamp: IntArray,
+        stamp: Int,
+        sweepNo: Int,
+        softConstraints: Boolean,
+    ): Float {
         var maxCorrection = 0f
         for (i in 0 until constraintCount) {
             if (activeStamp[i] < sweepNo) continue
             val a = itemIdx[i]
             val b = neighborIdx[i]
-            if (!present[a] || !present[b]) continue
+            if (presentStamp[a] != stamp || presentStamp[b] != stamp) continue
 
             val isFree = free[i]
             if (isFree &&
@@ -371,13 +353,11 @@ internal class CompiledConstraints(
                 if (deltaAx != 0f || deltaAy != 0f) {
                     x[a] += deltaAx
                     y[a] += deltaAy
-                    movedEver[a] = true
                     activate(a, sweepNo + 1)
                 }
                 if (deltaBx != 0f || deltaBy != 0f) {
                     x[b] += deltaBx
                     y[b] += deltaBy
-                    movedEver[b] = true
                     activate(b, sweepNo + 1)
                 }
             }
