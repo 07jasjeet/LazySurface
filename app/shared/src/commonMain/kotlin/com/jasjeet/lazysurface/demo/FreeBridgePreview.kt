@@ -131,54 +131,54 @@ fun FreeBridgePreview(
                     highlighted = centeredKey == "origin",
                 )
             }
-            for (index in 1..ChainLength) {
+            items(
+                items = List(ChainLength) { it + 1 },
+                key = { Bridge.south(it) },
+                neighbors = { index ->
+                    below(if (index == 1) Bridge.Origin else Bridge.south(index - 1)) margin 40.dp
+                    // The bridge: pure adjacency between the two chain ends.
+                    // It routes navigation and never positions either end.
+                    if (index == ChainLength) endOf(Bridge.WestEnd) aligned Free
+                },
+            ) { index ->
                 val south = Bridge.south(index)
-                item(
+                BridgeCard(
+                    modifier = Modifier.relationLines(state, south, showRelationLines),
                     key = south,
-                    neighbors = {
-                        below(if (index == 1) Bridge.Origin else Bridge.south(index - 1)) margin 40.dp
-                        // The bridge: pure adjacency between the two chain ends.
-                        // It routes navigation and never positions either end.
-                        if (index == ChainLength) endOf(Bridge.WestEnd) aligned Free
+                    subtitle = when (index) {
+                        ChainLength -> "tap: cross the free bridge to ${Bridge.WestEnd}"
+                        else -> null
                     },
-                ) {
-                    BridgeCard(
-                        modifier = Modifier.relationLines(state, south, showRelationLines),
-                        key = south,
-                        subtitle = when (index) {
-                            ChainLength -> "tap: cross the free bridge to ${Bridge.WestEnd}"
-                            else -> null
-                        },
-                        tint = MaterialTheme.colorScheme.secondaryContainer to
-                            MaterialTheme.colorScheme.onSecondaryContainer,
-                        highlighted = centeredKey == south,
-                        onTap = if (index == ChainLength) {
-                            { navigate(Bridge.WestEnd) }
-                        } else null,
-                    )
-                }
+                    tint = MaterialTheme.colorScheme.secondaryContainer to
+                        MaterialTheme.colorScheme.onSecondaryContainer,
+                    highlighted = centeredKey == south,
+                    onTap = if (index == ChainLength) {
+                        { navigate(Bridge.WestEnd) }
+                    } else null,
+                )
+            }
+            items(
+                items = List(ChainLength) { it + 1 },
+                key = { Bridge.west(it) },
+                neighbors = { index ->
+                    startOf(if (index == 1) Bridge.Origin else Bridge.west(index - 1)) margin 40.dp
+                },
+            ) { index ->
                 val west = Bridge.west(index)
-                item(
+                BridgeCard(
+                    modifier = Modifier.relationLines(state, west, showRelationLines),
                     key = west,
-                    neighbors = {
-                        startOf(if (index == 1) Bridge.Origin else Bridge.west(index - 1)) margin 40.dp
+                    subtitle = when (index) {
+                        ChainLength -> "tap: cross the free bridge to ${Bridge.SouthEnd}"
+                        else -> null
                     },
-                ) {
-                    BridgeCard(
-                        modifier = Modifier.relationLines(state, west, showRelationLines),
-                        key = west,
-                        subtitle = when (index) {
-                            ChainLength -> "tap: cross the free bridge to ${Bridge.SouthEnd}"
-                            else -> null
-                        },
-                        tint = MaterialTheme.colorScheme.tertiaryContainer to
-                            MaterialTheme.colorScheme.onTertiaryContainer,
-                        highlighted = centeredKey == west,
-                        onTap = if (index == ChainLength) {
-                            { navigate(Bridge.SouthEnd) }
-                        } else null,
-                    )
-                }
+                    tint = MaterialTheme.colorScheme.tertiaryContainer to
+                        MaterialTheme.colorScheme.onTertiaryContainer,
+                    highlighted = centeredKey == west,
+                    onTap = if (index == ChainLength) {
+                        { navigate(Bridge.SouthEnd) }
+                    } else null,
+                )
             }
         }
 

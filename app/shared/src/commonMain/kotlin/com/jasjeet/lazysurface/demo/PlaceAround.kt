@@ -57,92 +57,93 @@ internal fun LazySurfaceScope.placeAround(
     key: (Int) -> Any = { it },
     itemContent: @Composable LazySurfaceItemScope.(index: Int, ring: Int) -> Unit,
 ) {
-    for (index in 0 until count) {
-        val ring = ringOf(index)
-        val slot = slotOf(ring, index - ringStart(ring))
-        val octant = slot / ring
-        val pos = slot % ring
-        item(
-            key = key(index),
-            neighbors = {
-                if (pos == 0) {
-                    // Anchor: relate to the same ray's anchor one layer in.
-                    // Even octants are the axes, odd octants the diagonals.
-                    val inner: Any =
-                        if (ring == 1) center
-                        else key(indexAt(ring - 1, octant * (ring - 1)))
-                    val diagonal = ringSpacing / 4
-                    when {
-                        // Cardinals: one axis verb along their ray.
-                        octant % 2 == 0 -> when (octant) {
-                            0 -> above(inner, margin = ringSpacing)   // N
-                            2 -> endOf(inner, margin = ringSpacing)   // E
-                            4 -> below(inner, margin = ringSpacing)   // S
-                            else -> startOf(inner, margin = ringSpacing) // W
-                        }
-                        // Corners ray to the same diagonal's inner anchor (the
-                        // center itself for ring 1) at a quarter of the axis
-                        // margin: a diagonal steps out on both axes at once, so
-                        // it needs far less margin for the same distance. Corners
-                        // never relate to their own ring's cardinals, on a wide
-                        // ring "adjacent to both" is geometrically impossible,
-                        // and the fight drags the cardinals off their rays.
-                        else -> when (octant) {
-                            1 -> { endOf(inner, margin = diagonal); above(inner, margin = diagonal) }    // NE
-                            3 -> { endOf(inner, margin = diagonal); below(inner, margin = diagonal) }    // SE
-                            5 -> { startOf(inner, margin = diagonal); below(inner, margin = diagonal) }  // SW
-                            else -> { startOf(inner, margin = diagonal); above(inner, margin = diagonal) } // NW
-                        }
+    items(
+        items = List(count) { it },
+        key = { key(it) },
+        neighbors = { index ->
+            val ring = ringOf(index)
+            val slot = slotOf(ring, index - ringStart(ring))
+            val octant = slot / ring
+            val pos = slot % ring
+            if (pos == 0) {
+                // Anchor: relate to the same ray's anchor one layer in.
+                // Even octants are the axes, odd octants the diagonals.
+                val inner: Any =
+                    if (ring == 1) center
+                    else key(indexAt(ring - 1, octant * (ring - 1)))
+                val diagonal = ringSpacing / 4
+                when {
+                    // Cardinals: one axis verb along their ray.
+                    octant % 2 == 0 -> when (octant) {
+                        0 -> above(inner, margin = ringSpacing)   // N
+                        2 -> endOf(inner, margin = ringSpacing)   // E
+                        4 -> below(inner, margin = ringSpacing)   // S
+                        else -> startOf(inner, margin = ringSpacing) // W
                     }
-                } else {
-                    // In-item: positioned by its layer link alone, the in-ring
-                    // guard edges below carry no geometry.
-                    // The layer link spreads the section evenly
-                    // over the one below: an inner section always holds one
-                    // in-item fewer, so positions pair 1:1 counted from the
-                    // cardinal and the in-item hugging the diagonal links to the
-                    // inner corner itself.
-                    val innerSection = octant * (ring - 1)
-                    val innerSlot = when {
-                        octant % 2 == 0 ->
-                            if (pos == ring - 1) (octant + 1) * (ring - 1)
-                            else innerSection + pos
-                        else ->
-                            if (pos == 1) innerSection
-                            else innerSection + pos - 1
-                    }
-                    val inner = key(indexAt(ring - 1, innerSlot))
-                    // The link keeps the full ringSpacing on its axis. The taper
-                    // toward the diagonal is NOT declared here: with the corners
-                    // tucked in by their quarter margins, every edge slants, and a
-                    // constant axis gap over a slanted edge already thins the
-                    // radial ring separation toward the diagonal. Declaring a
-                    // smaller margin on top of that double-counts the taper, the
-                    // links then under-reach, and their soft pulls drag the inner
-                    // corners outward until the diagonal reads as full margin.
-                    when (octant) {
-                        7, 0 -> above(inner, margin = ringSpacing)
-                        1, 2 -> endOf(inner, margin = ringSpacing)
-                        3, 4 -> below(inner, margin = ringSpacing)
-                        else -> startOf(inner, margin = ringSpacing)
+                    // Corners ray to the same diagonal's inner anchor (the
+                    // center itself for ring 1) at a quarter of the axis
+                    // margin: a diagonal steps out on both axes at once, so
+                    // it needs far less margin for the same distance. Corners
+                    // never relate to their own ring's cardinals, on a wide
+                    // ring "adjacent to both" is geometrically impossible,
+                    // and the fight drags the cardinals off their rays.
+                    else -> when (octant) {
+                        1 -> { endOf(inner, margin = diagonal); above(inner, margin = diagonal) }    // NE
+                        3 -> { endOf(inner, margin = diagonal); below(inner, margin = diagonal) }    // SE
+                        5 -> { startOf(inner, margin = diagonal); below(inner, margin = diagonal) }  // SW
+                        else -> { startOf(inner, margin = diagonal); above(inner, margin = diagonal) } // NW
                     }
                 }
+            } else {
+                // In-item: positioned by its layer link alone, the in-ring
+                // guard edges below carry no geometry.
+                // The layer link spreads the section evenly
+                // over the one below: an inner section always holds one
+                // in-item fewer, so positions pair 1:1 counted from the
+                // cardinal and the in-item hugging the diagonal links to the
+                // inner corner itself.
+                val innerSection = octant * (ring - 1)
+                val innerSlot = when {
+                    octant % 2 == 0 ->
+                        if (pos == ring - 1) (octant + 1) * (ring - 1)
+                        else innerSection + pos
+                    else ->
+                        if (pos == 1) innerSection
+                        else innerSection + pos - 1
+                }
+                val inner = key(indexAt(ring - 1, innerSlot))
+                // The link keeps the full ringSpacing on its axis. The taper
+                // toward the diagonal is NOT declared here: with the corners
+                // tucked in by their quarter margins, every edge slants, and a
+                // constant axis gap over a slanted edge already thins the
+                // radial ring separation toward the diagonal. Declaring a
+                // smaller margin on top of that double-counts the taper, the
+                // links then under-reach, and their soft pulls drag the inner
+                // corners outward until the diagonal reads as full margin.
+                when (octant) {
+                    7, 0 -> above(inner, margin = ringSpacing)
+                    1, 2 -> endOf(inner, margin = ringSpacing)
+                    3, 4 -> below(inner, margin = ringSpacing)
+                    else -> startOf(inner, margin = ringSpacing)
+                }
+            }
 
-                // Every item guards against its ring predecessor (the first slot
-                // wraps to the ring's last) with a Free edge along the local
-                // direction of travel: adjacency for navigation routing plus a
-                // hard no-overlap floor, but NO declared geometry, so it can
-                // never fight the rays, however sparse or dense the ring is.
-                val previousInRing = key(indexAt(ring, if (slot == 0) 8 * ring - 1 else slot - 1))
-                val edgeOctant = if (pos == 0) (octant + 7) % 8 else octant
-                when (edgeOctant) {
-                    7, 0 -> endOf(previousInRing, LazySurfaceNeighbor.Alignment.Free)   // top, rightward
-                    1, 2 -> below(previousInRing, LazySurfaceNeighbor.Alignment.Free)   // right, downward
-                    3, 4 -> startOf(previousInRing, LazySurfaceNeighbor.Alignment.Free) // bottom, leftward
-                    else -> above(previousInRing, LazySurfaceNeighbor.Alignment.Free)   // left, upward
-                }
-            },
-        ) { itemContent(index, ring) }
+            // Every item guards against its ring predecessor (the first slot
+            // wraps to the ring's last) with a Free edge along the local
+            // direction of travel: adjacency for navigation routing plus a
+            // hard no-overlap floor, but NO declared geometry, so it can
+            // never fight the rays, however sparse or dense the ring is.
+            val previousInRing = key(indexAt(ring, if (slot == 0) 8 * ring - 1 else slot - 1))
+            val edgeOctant = if (pos == 0) (octant + 7) % 8 else octant
+            when (edgeOctant) {
+                7, 0 -> endOf(previousInRing, LazySurfaceNeighbor.Alignment.Free)   // top, rightward
+                1, 2 -> below(previousInRing, LazySurfaceNeighbor.Alignment.Free)   // right, downward
+                3, 4 -> startOf(previousInRing, LazySurfaceNeighbor.Alignment.Free) // bottom, leftward
+                else -> above(previousInRing, LazySurfaceNeighbor.Alignment.Free)   // left, upward
+            }
+        },
+    ) { index ->
+        itemContent(index, ringOf(index))
     }
 }
 

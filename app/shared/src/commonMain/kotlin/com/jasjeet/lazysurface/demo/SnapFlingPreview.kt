@@ -302,16 +302,18 @@ fun SnapFlingPreview(
             flingBehavior = rememberSnapFlingBehavior(state),
         ) {
             Sections.forEach { section ->
-                section.cards.forEach { card ->
-                    item(key = card.key, neighbors = card.neighbors) {
-                        SectionCard(
-                            spec = card,
-                            tint = section.tint(MaterialTheme.colorScheme),
-                            highlighted = centeredKey == card.key,
-                            onTap = card.flyTo?.let { destination -> { navigate(destination) } },
-                            modifier = Modifier.relationLines(state, card.key, showRelationLines),
-                        )
-                    }
+                items(
+                    items = section.cards,
+                    key = { it.key },
+                    neighbors = { card -> card.neighbors(this) },
+                ) { card ->
+                    SectionCard(
+                        spec = card,
+                        tint = section.tint(MaterialTheme.colorScheme),
+                        highlighted = centeredKey == card.key,
+                        onTap = card.flyTo?.let { destination -> { navigate(destination) } },
+                        modifier = Modifier.relationLines(state, card.key, showRelationLines),
+                    )
                 }
             }
         }

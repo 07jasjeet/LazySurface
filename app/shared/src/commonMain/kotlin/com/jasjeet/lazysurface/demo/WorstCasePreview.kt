@@ -123,49 +123,46 @@ fun WorstCasePreview(
             state = state,
             modifier = Modifier.fillMaxSize(),
         ) {
-            for (r in 0 until GridSide) {
-                for (c in 0 until GridSide) {
-                    val cell = Cell(r, c)
-                    item(
-                        key = cell,
-                        neighbors = {
-                            if (r == 0 && c == 0) atPivot()
-                            if (c > 0) endOf(Cell(r, c - 1), margin = 12.dp)
-                            if (r > 0) below(Cell(r - 1, c), margin = 12.dp)
-                            // The impossible claim: this cell says it sits at the
-                            // end of a cell that really lies four columns to its
-                            // RIGHT. The lattice wins the joint placement, and the
-                            // solver fights the floor forever.
-                            if (conflict && cell == ConflictA) endOf(ConflictB)
-                        },
-                    ) {
-                        val inConflict = conflict && (cell == ConflictA || cell == ConflictB)
-                        val tint =
-                            if (inConflict) MaterialTheme.colorScheme.error
-                            else lerp(Color(0xFF90CAF9), Color(0xFF0D47A1), (r + c) / (2f * GridSide))
-                        val scale = if (pulsing && cell == CenterCell) {
-                            val transition = rememberInfiniteTransition(label = "pulse")
-                            transition.animateFloat(
-                                initialValue = 1f,
-                                targetValue = 2.6f,
-                                animationSpec = infiniteRepeatable(tween(1100), RepeatMode.Reverse),
-                                label = "centerScale",
-                            ).value
-                        } else 1f
-                        Box(
-                            modifier = Modifier
-                                .relationLines(state, cell, showRelationLines)
-                                .size(48.dp * scale)
-                                .background(tint),
-                        ) {
-                            Text(
-                                "$r,$c",
-                                modifier = Modifier.fillMaxSize().wrapContentSize(),
-                                color = if (tint.luminance() > 0.55f) Color.Black else Color.White,
-                                fontSize = 9.sp,
-                            )
-                        }
-                    }
+            items(
+                items = List(GridSide * GridSide) { Cell(it / GridSide, it % GridSide) },
+                neighbors = { cell ->
+                    val (r, c) = cell
+                    if (r == 0 && c == 0) atPivot()
+                    if (c > 0) endOf(Cell(r, c - 1), margin = 12.dp)
+                    if (r > 0) below(Cell(r - 1, c), margin = 12.dp)
+                    // The impossible claim: this cell says it sits at the
+                    // end of a cell that really lies four columns to its
+                    // RIGHT. The lattice wins the joint placement, and the
+                    // solver fights the floor forever.
+                    if (conflict && cell == ConflictA) endOf(ConflictB)
+                },
+            ) { cell ->
+                val (r, c) = cell
+                val inConflict = conflict && (cell == ConflictA || cell == ConflictB)
+                val tint =
+                    if (inConflict) MaterialTheme.colorScheme.error
+                    else lerp(Color(0xFF90CAF9), Color(0xFF0D47A1), (r + c) / (2f * GridSide))
+                val scale = if (pulsing && cell == CenterCell) {
+                    val transition = rememberInfiniteTransition(label = "pulse")
+                    transition.animateFloat(
+                        initialValue = 1f,
+                        targetValue = 2.6f,
+                        animationSpec = infiniteRepeatable(tween(1100), RepeatMode.Reverse),
+                        label = "centerScale",
+                    ).value
+                } else 1f
+                Box(
+                    modifier = Modifier
+                        .relationLines(state, cell, showRelationLines)
+                        .size(48.dp * scale)
+                        .background(tint),
+                ) {
+                    Text(
+                        "$r,$c",
+                        modifier = Modifier.fillMaxSize().wrapContentSize(),
+                        color = if (tint.luminance() > 0.55f) Color.Black else Color.White,
+                        fontSize = 9.sp,
+                    )
                 }
             }
         }
