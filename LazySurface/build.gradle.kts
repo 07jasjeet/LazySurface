@@ -44,7 +44,7 @@ mavenPublishing {
 kotlin {
     jvmToolchain(21)
 
-    androidLibrary {
+    android {
         namespace = "com.jasjeet.lazysurface"
         compileSdk = 36
         minSdk = 24

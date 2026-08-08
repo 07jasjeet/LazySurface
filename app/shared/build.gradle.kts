@@ -10,7 +10,7 @@ plugins {
 kotlin {
     jvmToolchain(21)
 
-    androidLibrary {
+    android {
         namespace = "com.jasjeet.lazysurface.demo.shared"
         compileSdk = 37
         minSdk = 24
